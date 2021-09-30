@@ -1,4 +1,4 @@
--- Copyright 2017-2021 Jeff Foley. All rights reserved.
+-- Copyright 2020-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local json = require("json")
@@ -7,7 +7,7 @@ name = "SecurityTrails"
 type = "api"
 
 function start()
-    setratelimit(1)
+    set_rate_limit(2)
 end
 
 function check()
@@ -35,13 +35,11 @@ function vertical(ctx, domain)
     end
 
     local resp, err = request(ctx, {
-        url=verturl(domain),
-        headers={
-            APIKEY=c.key,
-            ['Content-Type']="application/json",
-        },
+        ['url']=vert_url(domain),
+        headers={['APIKEY']=c.key},
     })
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
         return
     end
 
@@ -50,28 +48,13 @@ function vertical(ctx, domain)
         return
     end
 
-    for i, sub in pairs(j.subdomains) do
-        sendnames(ctx, sub .. "." .. domain)
+    for _, sub in pairs(j.subdomains) do
+        new_name(ctx, sub .. "." .. domain)
     end
 end
 
-function verturl(domain)
+function vert_url(domain)
     return "https://api.securitytrails.com/v1/domain/" .. domain .. "/subdomains"
-end
-
-function sendnames(ctx, content)
-    local names = find(content, subdomainre)
-    if (names == nil) then
-        return
-    end
-
-    local found = {}
-    for i, v in pairs(names) do
-        if (found[v] == nil) then
-            newname(ctx, v)
-            found[v] = true
-        end
-    end
 end
 
 function horizontal(ctx, domain)
@@ -81,33 +64,33 @@ function horizontal(ctx, domain)
         c = cfg.credentials
     end
 
-    if (c == nil or c.key == "") then
+    if (c == nil or c.key == nil or c.key == "") then
         return
     end
 
-    local resp, err = request(ctx, {
-        url=horizonurl(domain),
-        headers={
-            APIKEY=c.key,
-            ['Content-Type']="application/json",
-        },
-    })
-    if (err ~= nil and err ~= "") then
-        return
-    end
+    for i=1,100 do
+        local resp, err = request(ctx, {
+            ['url']=horizon_url(domain, i),
+            headers={['APIKEY']=c.key},
+        })
+        if (err ~= nil and err ~= "") then
+            log(ctx, "horizontal request to service failed: " .. err)
+            return
+        end
 
-    local j = json.decode(resp)
-    if (j == nil or #(j.records) == 0) then
-        return
-    end
+        local j = json.decode(resp)
+        if (j == nil or #(j.records) == 0) then
+            return
+        end
 
-    for i, r in pairs(j.records) do
-        if (r.hostname ~= "") then
-            associated(ctx, domain, r.hostname)
+        for _, r in pairs(j.records) do
+            if (r.hostname ~= nil and r.hostname ~= "") then
+                associated(ctx, domain, r.hostname)
+            end
         end
     end
 end
 
-function horizonurl(domain)
-    return "https://api.securitytrails.com/v1/domain/" .. domain .. "/associated"
+function horizon_url(domain, pagenum)
+    return "https://api.securitytrails.com/v1/domain/" .. domain .. "/associated?page=" .. pagenum
 end

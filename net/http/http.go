@@ -15,8 +15,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,24 +34,24 @@ import (
 )
 
 const (
-	// UserAgent is the default user agent used by Amass during HTTP requests.
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.49 Safari/537.36"
-
 	// Accept is the default HTTP Accept header value used by Amass.
-	Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+	Accept = "text/html,application/json,application/xhtml+xml,application/xml;q=0.5,*/*;q=0.2"
 
 	// AcceptLang is the default HTTP Accept-Language header value used by Amass.
-	AcceptLang = "en-US,en;q=0.8"
+	AcceptLang = "en-US,en;q=0.5"
 
 	httpTimeout      = 30 * time.Second
-	handshakeTimeout = 5 * time.Second
+	handshakeTimeout = 10 * time.Second
 )
 
 var (
-	subRE          = dns.AnySubdomainRegex()
-	crawlRE        = regexp.MustCompile(`\.\w{3,4}($|\?)`)
-	crawlFileTypes = []string{".html", ".htm", "xhtml", ".js", ".php"}
-	nameStripRE    = regexp.MustCompile(`^u[0-9a-f]{4}|20|22|25|2b|2f|3d|3a|40`)
+	// UserAgent is the default user agent used by Amass during HTTP requests.
+	UserAgent       string
+	subRE           = dns.AnySubdomainRegex()
+	crawlRE         = regexp.MustCompile(`\.\w{2,6}($|\?|#)`)
+	crawlFileEnds   = []string{"html", "do", "action", "cgi"}
+	crawlFileStarts = []string{"js", "htm", "as", "php", "inc"}
+	nameStripRE     = regexp.MustCompile(`^u[0-9a-f]{4}|20|22|25|27|2b|2f|3d|3a|40`)
 )
 
 // DefaultClient is the same HTTP client used by the package methods.
@@ -72,10 +74,19 @@ func init() {
 			MaxConnsPerHost:       50,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   handshakeTimeout,
-			ExpectContinueTimeout: 10 * time.Second,
+			ExpectContinueTimeout: 5 * time.Second,
 			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 		},
 		Jar: jar,
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
+	case "darwin":
+		UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
+	default:
+		UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
 	}
 }
 
@@ -111,13 +122,15 @@ func RequestWebPage(ctx context.Context, u string, body io.Reader, hvals map[str
 	if err != nil {
 		return "", err
 	}
+	req.Close = true
+
 	if auth != nil && auth.Username != "" && auth.Password != "" {
 		req.SetBasicAuth(auth.Username, auth.Password)
 	}
+
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Accept", Accept)
 	req.Header.Set("Accept-Language", AcceptLang)
-
 	for k, v := range hvals {
 		req.Header.Set(k, v)
 	}
@@ -131,7 +144,7 @@ func RequestWebPage(ctx context.Context, u string, body io.Reader, hvals map[str
 	resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		err = errors.New(resp.Status)
+		err = fmt.Errorf("%d: %s", resp.StatusCode, resp.Status)
 	}
 	return string(in), err
 }
@@ -162,11 +175,14 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f filter.Filt
 
 	if f == nil {
 		f = filter.NewStringFilter()
+		defer f.Close()
 	}
 
 	var count int
 	var m sync.Mutex
 	results := stringset.New()
+	defer results.Close()
+
 	g := geziyor.NewGeziyor(&geziyor.Options{
 		AllowedDomains:        newScope,
 		StartURLs:             []string{u},
@@ -178,67 +194,48 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f filter.Filt
 		RequestDelay:          750 * time.Millisecond,
 		RequestDelayRandomize: true,
 		ParseFunc: func(g *geziyor.Geziyor, r *client.Response) {
-			for _, n := range subRE.FindAllString(string(r.Body), -1) {
-				if name := CleanName(n); whichDomain(name, scope) != "" {
-					m.Lock()
-					results.Insert(name)
-					m.Unlock()
-				}
-			}
-
-			processURL := func(u string) {
-				if p, err := url.Parse(u); err == nil && whichDomain(p.Hostname(), newScope) != "" {
-					// Attempt to save the name in our results
-					if name := p.Hostname(); whichDomain(name, scope) != "" {
+			resp, err := httputil.DumpResponse(interface{}(r).(*http.Response), true)
+			if err == nil {
+				for _, n := range subRE.FindAllString(string(resp), -1) {
+					if name := CleanName(n); whichDomain(name, scope) != "" {
 						m.Lock()
 						results.Insert(name)
 						m.Unlock()
 					}
-					// Check that the URL has an appropriate scheme for scraping
-					if !p.IsAbs() || (p.Scheme != "http" && p.Scheme != "https") {
-						return
-					}
-					// If the URL path has a file extension, check that it's of interest
-					if ext := crawlRE.FindString(p.Path); ext != "" {
-						ext = strings.ToLower(ext)
+				}
+			}
 
-						var found bool
-						for _, t := range crawlFileTypes {
-							if ext == t {
-								found = true
-								break
-							}
-						}
-						if !found {
-							return
-						}
-					}
-					// Remove fragments and check if we've seen this URL before
-					p.Fragment = ""
-					p.RawFragment = ""
-					if f.Duplicate(p.String()) {
-						return
-					}
+			processURL := func(u *url.URL) {
+				// Attempt to save the name in our results
+				m.Lock()
+				results.Insert(u.Hostname())
+				m.Unlock()
+
+				if s := crawlFilterURLs(u, f); s != "" {
 					// Be sure the crawl has not exceeded the maximum links to be followed
 					m.Lock()
 					count++
 					current := count
 					m.Unlock()
 					if max <= 0 || current < max {
-						g.Get(p.String(), g.Opt.ParseFunc)
+						g.Get(s, g.Opt.ParseFunc)
 					}
 				}
 			}
 
 			r.HTMLDoc.Find("a").Each(func(i int, s *goquery.Selection) {
 				if href, ok := s.Attr("href"); ok {
-					processURL(r.JoinURL(href))
+					if u, err := r.JoinURL(href); err == nil && whichDomain(u.Hostname(), newScope) != "" {
+						processURL(u)
+					}
 				}
 			})
 
 			r.HTMLDoc.Find("script").Each(func(i int, s *goquery.Selection) {
 				if src, ok := s.Attr("src"); ok {
-					processURL(r.JoinURL(src))
+					if u, err := r.JoinURL(src); err == nil && whichDomain(u.Hostname(), newScope) != "" {
+						processURL(u)
+					}
 				}
 			})
 		},
@@ -270,6 +267,41 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f filter.Filt
 	return results.Slice(), err
 }
 
+func crawlFilterURLs(p *url.URL, f filter.Filter) string {
+	// Check that the URL has an appropriate scheme for scraping
+	if !p.IsAbs() || (p.Scheme != "http" && p.Scheme != "https") {
+		return ""
+	}
+	// If the URL path has a file extension, check that it's of interest
+	if ext := crawlRE.FindString(p.Path); ext != "" {
+		ext = strings.ToLower(ext)
+
+		var found bool
+		for _, s := range crawlFileStarts {
+			if strings.HasPrefix(ext, "." + s) {
+				found = true
+				break
+			}
+		}
+		for _, e := range crawlFileEnds {
+			if strings.HasSuffix(ext, e) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ""
+		}
+	}
+	// Remove fragments and check if we've seen this URL before
+	p.Fragment = ""
+	p.RawFragment = ""
+	if f.Duplicate(p.String()) {
+		return ""
+	}
+	return p.String()
+}
+
 func whichDomain(name string, scope []string) string {
 	n := strings.TrimSpace(name)
 
@@ -299,31 +331,7 @@ func PullCertificateNames(ctx context.Context, addr string, ports []int) []strin
 		default:
 		}
 
-		// Set the maximum time allowed for making the connection
-		tCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-		defer cancel()
-		// Obtain the connection
-		conn, err := amassnet.DialContext(tCtx, "tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
-		if err != nil {
-			continue
-		}
-		defer conn.Close()
-
-		c := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
-		// Attempt to acquire the certificate chain
-		errChan := make(chan error, 2)
-		go func() {
-			errChan <- c.Handshake()
-		}()
-
-		t := time.NewTimer(handshakeTimeout)
-		select {
-		case <-t.C:
-			err = errors.New("Handshake timeout")
-		case e := <-errChan:
-			err = e
-		}
-		t.Stop()
+		c, err := TLSConn(ctx, addr, port)
 
 		if err != nil {
 			continue
@@ -336,6 +344,37 @@ func PullCertificateNames(ctx context.Context, addr string, ports []int) []strin
 	}
 
 	return names
+}
+
+// TLSConn attempts to make a TLS connection with the host on given port
+func TLSConn(ctx context.Context, host string, port int) (*tls.Conn, error) {
+	// Set the maximum time allowed for making the connection
+	tCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	// Obtain the connection
+	conn, err := amassnet.DialContext(tCtx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	c := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
+	// Attempt to acquire the certificate chain
+	errChan := make(chan error, 2)
+	go func() {
+		errChan <- c.Handshake()
+	}()
+
+	t := time.NewTimer(handshakeTimeout)
+	select {
+	case <-t.C:
+		err = errors.New("Handshake timeout")
+	case e := <-errChan:
+		err = e
+	}
+	t.Stop()
+
+	return c, err
 }
 
 func namesFromCert(cert *x509.Certificate) []string {
@@ -352,6 +391,8 @@ func namesFromCert(cert *x509.Certificate) []string {
 	}
 
 	subdomains := stringset.New()
+	defer subdomains.Close()
+
 	// Add the subject common name to the list of subdomain names
 	commonName := dns.RemoveAsteriskLabel(cn)
 	if commonName != "" {

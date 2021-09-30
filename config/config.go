@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +29,10 @@ import (
 )
 
 const (
-	outputDirectoryName = "amass"
+	outputDirName  = "amass"
+	defaultCfgFile = "config.ini"
+	cfgEnvironVar  = "AMASS_CONFIG"
+	systemCfgDir   = "/etc"
 )
 
 var (
@@ -55,6 +59,9 @@ type Config struct {
 
 	// Logger for error messages
 	Log *log.Logger
+
+	// Share activates the process that shares findings with providers for service credits
+	Share bool `ini:"share"`
 
 	// The directory that stores the bolt db and other files created
 	Dir string `ini:"output_directory"`
@@ -115,7 +122,8 @@ type Config struct {
 	Active bool
 
 	// A blacklist of subdomain names that will not be investigated
-	Blacklist []string
+	Blacklist     []string
+	blacklistLock sync.Mutex
 
 	// A list of data sources that should not be utilized
 	SourceFilter struct {
@@ -130,8 +138,7 @@ type Config struct {
 	RecordTypes []string
 
 	// Resolver settings
-	Resolvers           []string
-	MonitorResolverRate bool
+	Resolvers []string
 
 	// Option for verbose logging and output
 	Verbose bool
@@ -149,12 +156,11 @@ type Config struct {
 // NewConfig returns a default configuration object.
 func NewConfig() *Config {
 	c := &Config{
-		UUID:                uuid.New(),
-		Log:                 log.New(ioutil.Discard, "", 0),
-		Ports:               []int{80, 443},
-		MinForRecursive:     1,
-		MonitorResolverRate: true,
-		LocalDatabase:       true,
+		UUID:            uuid.New(),
+		Log:             log.New(ioutil.Discard, "", 0),
+		Ports:           []int{80, 443},
+		MinForRecursive: 1,
+		LocalDatabase:   true,
 		// The following is enum-only, but intel will just ignore them anyway
 		Alterations:    true,
 		FlipWords:      true,
@@ -257,16 +263,25 @@ func (c *Config) LoadSettings(path string) error {
 
 // AcquireConfig populates the Config struct provided by the Config argument.
 func AcquireConfig(dir, file string, cfg *Config) error {
-	var path string
+	var path, dircfg, syscfg string
+
+	d := OutputDirectory(dir)
+	if finfo, err := os.Stat(d); d != "" && !os.IsNotExist(err) && finfo.IsDir() {
+		dircfg = filepath.Join(d, defaultCfgFile)
+	}
+
+	if runtime.GOOS != "windows" {
+		syscfg = filepath.Join(filepath.Join(systemCfgDir, outputDirName), defaultCfgFile)
+	}
 
 	if file != "" {
 		path = file
-	} else if f, set := os.LookupEnv("AMASS_CONFIG"); set {
+	} else if f, set := os.LookupEnv(cfgEnvironVar); set {
 		path = f
-	} else if d := OutputDirectory(dir); d != "" {
-		if finfo, err := os.Stat(d); !os.IsNotExist(err) && finfo.IsDir() {
-			path = filepath.Join(d, "config.ini")
-		}
+	} else if _, err := os.Stat(dircfg); err == nil {
+		path = dircfg
+	} else if _, err := os.Stat(syscfg); err == nil {
+		path = syscfg
 	}
 
 	return cfg.LoadSettings(path)
@@ -280,7 +295,7 @@ func OutputDirectory(dir ...string) string {
 	}
 
 	if path, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(path, outputDirectoryName)
+		return filepath.Join(path, outputDirName)
 	}
 
 	return ""

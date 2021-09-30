@@ -33,27 +33,26 @@ const (
 
 type intelArgs struct {
 	Addresses        format.ParseIPs
-	ASNs             format.ParseInts
+	ASNs             format.ParseASNs
 	CIDRs            format.ParseCIDRs
 	OrganizationName string
-	Domains          stringset.Set
-	Excluded         stringset.Set
-	Included         stringset.Set
+	Domains          *stringset.Set
+	Excluded         *stringset.Set
+	Included         *stringset.Set
 	MaxDNSQueries    int
 	Ports            format.ParseInts
-	Resolvers        stringset.Set
+	Resolvers        *stringset.Set
 	Timeout          int
 	Options          struct {
-		Active              bool
-		DemoMode            bool
-		IPs                 bool
-		IPv4                bool
-		IPv6                bool
-		ListSources         bool
-		ReverseWhois        bool
-		Sources             bool
-		MonitorResolverRate bool
-		Verbose             bool
+		Active       bool
+		DemoMode     bool
+		IPs          bool
+		IPv4         bool
+		IPv6         bool
+		ListSources  bool
+		ReverseWhois bool
+		Sources      bool
+		Verbose      bool
 	}
 	Filepaths struct {
 		ConfigFile   string
@@ -72,12 +71,12 @@ func defineIntelArgumentFlags(intelFlags *flag.FlagSet, args *intelArgs) {
 	intelFlags.Var(&args.ASNs, "asn", "ASNs separated by commas (can be used multiple times)")
 	intelFlags.Var(&args.CIDRs, "cidr", "CIDRs separated by commas (can be used multiple times)")
 	intelFlags.StringVar(&args.OrganizationName, "org", "", "Search string provided against AS description information")
-	intelFlags.Var(&args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
-	intelFlags.Var(&args.Excluded, "exclude", "Data source names separated by commas to be excluded")
-	intelFlags.Var(&args.Included, "include", "Data source names separated by commas to be included")
+	intelFlags.Var(args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
+	intelFlags.Var(args.Excluded, "exclude", "Data source names separated by commas to be excluded")
+	intelFlags.Var(args.Included, "include", "Data source names separated by commas to be included")
 	intelFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of concurrent DNS queries")
 	intelFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
-	intelFlags.Var(&args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
+	intelFlags.Var(args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
 	intelFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
 
@@ -88,7 +87,6 @@ func defineIntelOptionFlags(intelFlags *flag.FlagSet, args *intelArgs) {
 	intelFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	intelFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
 	intelFlags.BoolVar(&args.Options.ListSources, "list", false, "Print additional information")
-	intelFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	intelFlags.BoolVar(&args.Options.ReverseWhois, "whois", false, "All provided domains are run through reverse whois")
 	intelFlags.BoolVar(&args.Options.Sources, "src", false, "Print data sources for the discovered names")
 	intelFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
@@ -136,8 +134,8 @@ func runIntelCommand(clArgs []string) {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
 		return
 	}
-	if (len(args.Excluded) > 0 || args.Filepaths.ExcludedSrcs != "") &&
-		(len(args.Included) > 0 || args.Filepaths.IncludedSrcs != "") {
+	if (args.Excluded.Len() > 0 || args.Filepaths.ExcludedSrcs != "") &&
+		(args.Included.Len() > 0 || args.Filepaths.IncludedSrcs != "") {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
 		os.Exit(1)
 	}
@@ -153,7 +151,7 @@ func runIntelCommand(clArgs []string) {
 	// Check if a configuration file was provided, and if so, load the settings
 	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		// Check if a config file was provided that has DNS resolvers specified
-		if len(cfg.Resolvers) > 0 && len(args.Resolvers) == 0 {
+		if len(cfg.Resolvers) > 0 && args.Resolvers.Len() == 0 {
 			args.Resolvers = stringset.New(cfg.Resolvers...)
 		}
 	} else if args.Filepaths.ConfigFile != "" {
@@ -271,7 +269,7 @@ func printNetblocks(asns []int, cfg *config.Config, sys systems.System) {
 		}
 
 		fmt.Printf("%s%s %s %s\n", blue("ASN: "), yellow(strconv.Itoa(asn)), green("-"), green(d.Description))
-		for _, cidr := range d.Netblocks.Slice() {
+		for _, cidr := range d.Netblocks {
 			fmt.Printf("%s\n", yellow(fmt.Sprintf("\t%s", cidr)))
 		}
 	}
@@ -323,14 +321,14 @@ func processIntelInputFiles(args *intelArgs) error {
 	if args.Filepaths.ExcludedSrcs != "" {
 		list, err := config.GetListFromFile(args.Filepaths.ExcludedSrcs)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the exclude file: %v", err)
+			return fmt.Errorf("failed to parse the exclude file: %v", err)
 		}
 		args.Excluded.InsertMany(list...)
 	}
 	if args.Filepaths.IncludedSrcs != "" {
 		list, err := config.GetListFromFile(args.Filepaths.IncludedSrcs)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the include file: %v", err)
+			return fmt.Errorf("failed to parse the include file: %v", err)
 		}
 		args.Included.InsertMany(list...)
 	}
@@ -338,7 +336,7 @@ func processIntelInputFiles(args *intelArgs) error {
 		for _, f := range args.Filepaths.Domains {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the domain names file: %v", err)
+				return fmt.Errorf("failed to parse the domain names file: %v", err)
 			}
 
 			args.Domains.InsertMany(list...)
@@ -348,7 +346,7 @@ func processIntelInputFiles(args *intelArgs) error {
 		for _, f := range args.Filepaths.Resolvers {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the resolver file: %v", err)
+				return fmt.Errorf("failed to parse the resolver file: %v", err)
 			}
 
 			args.Resolvers.InsertMany(list...)
@@ -386,14 +384,11 @@ func (i intelArgs) OverrideConfig(conf *config.Config) error {
 	if i.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = i.MaxDNSQueries
 	}
-	if !i.Options.MonitorResolverRate {
-		conf.MonitorResolverRate = false
-	}
 
-	if len(i.Included) > 0 {
+	if i.Included.Len() > 0 {
 		conf.SourceFilter.Include = true
 		conf.SourceFilter.Sources = i.Included.Slice()
-	} else if len(i.Excluded) > 0 {
+	} else if i.Excluded.Len() > 0 {
 		conf.SourceFilter.Include = false
 		conf.SourceFilter.Sources = i.Excluded.Slice()
 	}

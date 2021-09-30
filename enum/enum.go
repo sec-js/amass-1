@@ -19,6 +19,14 @@ import (
 	"github.com/caffix/service"
 )
 
+const (
+	defaultPipelineTasks   int = 50
+	maxInputSourceBuffer   int = 20000
+	maxRootPipelineTasks   int = 1000
+	maxDnsPipelineTasks    int = 15000
+	maxActivePipelineTasks int = 25
+)
+
 var filterMaxSize int64 = 1 << 23
 
 // Enumeration is the object type used to execute a DNS enumeration.
@@ -38,6 +46,7 @@ type Enumeration struct {
 	nameSrc        *enumSource
 	subTask        *subdomainTask
 	dnsTask        *dNSTask
+	store          *dataManager
 }
 
 // NewEnumeration returns an initialized Enumeration that has not been started yet.
@@ -60,6 +69,7 @@ func NewEnumeration(cfg *config.Config, sys systems.System) *Enumeration {
 
 	e.dnsTask = newDNSTask(e)
 	e.subTask = newSubdomainTask(e)
+	e.store = newDataManager(e)
 	return e
 }
 
@@ -68,6 +78,7 @@ func (e *Enumeration) Close() {
 	e.closedOnce.Do(func() {
 		e.Bus.Stop()
 		e.Graph.Close()
+		e.crawlFilter.Close()
 	})
 }
 
@@ -82,31 +93,32 @@ func (e *Enumeration) Start(ctx context.Context) error {
 	if err := e.Config.CheckSettings(); err != nil {
 		return err
 	}
+	e.setupContext(ctx)
 
-	max := e.Config.MaxDNSQueries
 	// The pipeline input source will receive all the names
-	e.nameSrc = newEnumSource(e, max)
-	e.startupAndCleanup(ctx)
+	e.nameSrc = newEnumSource(e, maxInputSourceBuffer)
+	e.startupAndCleanup()
 	defer e.stop()
 
 	var stages []pipeline.Stage
 	if !e.Config.Passive {
-		stages = append(stages, pipeline.FixedPool("", e.dnsTask.makeBlacklistTaskFunc(), 50))
+		stages = append(stages, pipeline.FixedPool("", e.dnsTask.makeBlacklistTaskFunc(), defaultPipelineTasks))
 		// Task that performs DNS queries for root domain names
-		stages = append(stages, pipeline.DynamicPool("root", e.dnsTask.makeRootTaskFunc(), max))
+		stages = append(stages, pipeline.DynamicPool("root", e.dnsTask.makeRootTaskFunc(), maxRootPipelineTasks))
 		// Add the dynamic pool of DNS resolution tasks
-		stages = append(stages, pipeline.DynamicPool("dns", e.dnsTask, max))
+		stages = append(stages, pipeline.DynamicPool("dns", e.dnsTask, maxDnsPipelineTasks))
 	}
 
 	stages = append(stages, pipeline.FIFO("filter", e.makeFilterTaskFunc()))
 
 	if !e.Config.Passive {
-		stages = append(stages, pipeline.DynamicPool("store", newDataManager(e), 50))
+		stages = append(stages, pipeline.DynamicPool("store", e.store, defaultPipelineTasks))
 		stages = append(stages, pipeline.FIFO("", e.subTask))
 	}
 	if e.Config.Active {
-		activetask := newActiveTask(e, 25)
+		activetask := newActiveTask(e, maxActivePipelineTasks)
 		defer activetask.Stop()
+
 		stages = append(stages, pipeline.FIFO("active", activetask))
 	}
 
@@ -115,15 +127,21 @@ func (e *Enumeration) Start(ctx context.Context) error {
 	 * by the user and names acquired from the graph database can be brought
 	 * into the enumeration
 	 */
-	go e.submitKnownNames()
+	e.submitKnownNames()
 	e.submitProvidedNames()
 	e.submitDomainNames()
 	e.submitASNs()
 
-	return pipeline.NewPipeline(stages...).Execute(e.ctx, e.nameSrc, e.makeOutputSink())
+	err := pipeline.NewPipeline(stages...).Execute(e.ctx, e.nameSrc, e.makeOutputSink())
+	if !e.Config.Passive {
+		// Ensure all data has been stored
+		e.store.signalDone <- struct{}{}
+		<-e.store.confirmDone
+	}
+	return err
 }
 
-func (e *Enumeration) startupAndCleanup(ctx context.Context) {
+func (e *Enumeration) startupAndCleanup() {
 	/*
 	 * These events are important to the engine in order to receive data,
 	 * logs, and notices about discoveries made during the enumeration
@@ -135,7 +153,6 @@ func (e *Enumeration) startupAndCleanup(ctx context.Context) {
 		e.Bus.Subscribe(requests.NewASNTopic, e.Sys.Cache().Update)
 	}
 
-	e.setupContext(ctx)
 	go e.periodicLogging()
 
 	go func() {
@@ -211,7 +228,7 @@ func (e *Enumeration) makeOutputSink() pipeline.SinkFunc {
 		}
 
 		if e.Config.IsDomainInScope(req.Name) {
-			if _, err := e.Graph.UpsertFQDN(req.Name, req.Source, e.Config.UUID.String()); err != nil {
+			if _, err := e.Graph.UpsertFQDN(e.ctx, req.Name, req.Source, e.Config.UUID.String()); err != nil {
 				e.Bus.Publish(requests.LogTopic, eventbus.PriorityHigh, err.Error())
 			}
 		}

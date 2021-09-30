@@ -7,7 +7,7 @@ name = "ZETAlytics"
 type = "api"
 
 function start()
-    setratelimit(5)
+    set_rate_limit(5)
 end
 
 function check()
@@ -34,12 +34,9 @@ function vertical(ctx, domain)
         return
     end
 
-    local vurl = buildurl(domain, c.key)
-    local resp, err = request(ctx, {
-        url=vurl,
-        headers={['Content-Type']="application/json"},
-    })
+    local resp, err = request(ctx, {['url']=build_url(domain, c.key)})
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
         return
     end
 
@@ -49,25 +46,10 @@ function vertical(ctx, domain)
     end
 
     for i, r in pairs(d.results) do
-        sendnames(ctx, r.qname)
+        send_names(ctx, r.qname)
     end
 end
 
-function buildurl(domain, key)
+function build_url(domain, key)
     return "https://zonecruncher.com/api/v1/subdomains?q=" .. domain .. "&token=" .. key
-end
-
-function sendnames(ctx, content)
-    local names = find(content, subdomainre)
-    if names == nil then
-        return
-    end
-
-    local found = {}
-    for i, v in pairs(names) do
-        if found[v] == nil then
-            newname(ctx, v)
-            found[v] = true
-        end
-    end
 end

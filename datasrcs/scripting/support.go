@@ -1,4 +1,4 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright 2020-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package scripting
@@ -30,144 +30,92 @@ func (s *Script) contextToUserData(ctx context.Context) *lua.LUserData {
 func checkContextExpired(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
-		return errors.New("Context expired")
+		return errors.New("context expired")
 	default:
 	}
-
 	return nil
 }
 
 func extractContext(udata *lua.LUserData) (context.Context, error) {
 	if udata == nil {
-		return nil, errors.New("Lua user data was nil")
+		return nil, errors.New("the Lua user data was nil")
 	}
 
 	val := udata.Value
-	if val == nil {
-		return nil, errors.New("The user data value was nil")
+	if val == lua.LNil {
+		return nil, errors.New("the user data value was nil")
 	}
 
 	wrapper, ok := val.(*contextWrapper)
 	if !ok {
-		return nil, errors.New("The user data was not a script context wrapper")
+		return nil, errors.New("the user data was not a script context wrapper")
 	}
 
 	ctx := wrapper.Ctx
 	if err := checkContextExpired(ctx); err != nil {
 		return nil, err
 	}
-
 	return ctx, nil
 }
 
 // Wrapper so that scripts can write messages to the Amass log.
 func (s *Script) log(L *lua.LState) int {
-	ctx, err := extractContext(L.CheckUserData(1))
-	if err != nil {
-		return 0
-	}
-
-	_, bus, err := requests.ContextConfigBus(ctx)
-	if err != nil {
-		return 0
-	}
-
-	lv := L.Get(2)
-	if lv == nil {
-		return 0
-	}
-
-	if msg, ok := lv.(lua.LString); ok {
-		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, s.String()+": "+string(msg))
+	if ctx, err := extractContext(L.CheckUserData(1)); err == nil {
+		if _, bus, err := requests.ContextConfigBus(ctx); err == nil {
+			if msg := L.CheckString(2); msg != "" {
+				bus.Publish(requests.LogTopic, eventbus.PriorityHigh, s.String()+": "+msg)
+			}
+		}
 	}
 	return 0
 }
 
 // Wrapper that exposes a simple regular expression matching function.
 func (s *Script) find(L *lua.LState) int {
-	lv := L.Get(1)
-	if lv == nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	str, ok := lv.(lua.LString)
-	if !ok {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	lv = L.Get(2)
-	if lv == nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	pattern, ok := lv.(lua.LString)
-	if !ok {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	re, err := regexp.Compile(string(pattern))
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
 	tb := L.NewTable()
-	for _, name := range re.FindAllString(string(str), -1) {
-		tb.Append(lua.LString(name))
+	str := L.CheckString(1)
+	pattern := L.CheckString(2)
+
+	if str != "" && pattern != "" {
+		if re, err := regexp.Compile(pattern); err == nil {
+			for _, name := range re.FindAllString(str, -1) {
+				tb.Append(lua.LString(name))
+			}
+		}
 	}
 
-	L.Push(tb)
+	if tb.Len() > 0 {
+		L.Push(tb)
+	} else {
+		L.Push(lua.LNil)
+	}
 	return 1
 }
 
 // Wrapper that exposes a regular expression matching function that supports submatches.
 func (s *Script) submatch(L *lua.LState) int {
-	lv := L.Get(1)
-	if lv == nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	str, ok := lv.(lua.LString)
-	if !ok {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	lv = L.Get(2)
-	if lv == nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	pattern, ok := lv.(lua.LString)
-	if !ok {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	re, err := regexp.Compile(string(pattern))
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	matches := re.FindStringSubmatch(string(str))
-	if matches == nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
 	tb := L.NewTable()
-	for _, match := range matches {
-		tb.Append(lua.LString(match))
+	str := L.CheckString(1)
+	pattern := L.CheckString(2)
+
+	if str != "" && pattern != "" {
+		if re, err := regexp.Compile(pattern); err == nil {
+			for _, matches := range re.FindAllStringSubmatch(str, -1) {
+				mtb := L.NewTable()
+
+				for _, match := range matches {
+					mtb.Append(lua.LString(match))
+				}
+				tb.Append(mtb)
+			}
+		}
 	}
 
-	L.Push(tb)
+	if tb.Len() > 0 {
+		L.Push(tb)
+	} else {
+		L.Push(lua.LNil)
+	}
 	return 1
 }
 

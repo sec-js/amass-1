@@ -31,20 +31,19 @@ const (
 )
 
 type dnsArgs struct {
-	Blacklist     stringset.Set
-	Domains       stringset.Set
+	Blacklist     *stringset.Set
+	Domains       *stringset.Set
 	MaxDNSQueries int
-	Names         stringset.Set
-	RecordTypes   stringset.Set
-	Resolvers     stringset.Set
+	Names         *stringset.Set
+	RecordTypes   *stringset.Set
+	Resolvers     *stringset.Set
 	Timeout       int
 	Options       struct {
-		DemoMode            bool
-		IPs                 bool
-		IPv4                bool
-		IPv6                bool
-		MonitorResolverRate bool
-		Verbose             bool
+		DemoMode bool
+		IPs      bool
+		IPv4     bool
+		IPv6     bool
+		Verbose  bool
 	}
 	Filepaths struct {
 		AllFilePrefix string
@@ -61,11 +60,11 @@ type dnsArgs struct {
 }
 
 func defineDNSArgumentFlags(dnsFlags *flag.FlagSet, args *dnsArgs) {
-	dnsFlags.Var(&args.Blacklist, "bl", "Blacklist of subdomain names that will not be investigated")
-	dnsFlags.Var(&args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
+	dnsFlags.Var(args.Blacklist, "bl", "Blacklist of subdomain names that will not be investigated")
+	dnsFlags.Var(args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
 	dnsFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of concurrent DNS queries")
-	dnsFlags.Var(&args.RecordTypes, "t", "DNS record types to be queried for (can be used multiple times)")
-	dnsFlags.Var(&args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
+	dnsFlags.Var(args.RecordTypes, "t", "DNS record types to be queried for (can be used multiple times)")
+	dnsFlags.Var(args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
 	dnsFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
 
@@ -74,7 +73,6 @@ func defineDNSOptionFlags(dnsFlags *flag.FlagSet, args *dnsArgs) {
 	dnsFlags.BoolVar(&args.Options.IPs, "ip", false, "Show the IP addresses for discovered names")
 	dnsFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	dnsFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
-	dnsFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	dnsFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
 }
 
@@ -134,7 +132,7 @@ func runDNSCommand(clArgs []string) {
 	// Check if a configuration file was provided, and if so, load the settings
 	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		// Check if a config file was provided that has DNS resolvers specified
-		if len(cfg.Resolvers) > 0 && len(args.Resolvers) == 0 {
+		if len(cfg.Resolvers) > 0 && args.Resolvers.Len() == 0 {
 			args.Resolvers = stringset.New(cfg.Resolvers...)
 		}
 	} else if args.Filepaths.ConfigFile != "" {
@@ -317,7 +315,7 @@ func processDNSInputFiles(args *dnsArgs) error {
 	if args.Filepaths.Blacklist != "" {
 		list, err := config.GetListFromFile(args.Filepaths.Blacklist)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the blacklist file: %v", err)
+			return fmt.Errorf("failed to parse the blacklist file: %v", err)
 		}
 		args.Blacklist.InsertMany(list...)
 	}
@@ -325,7 +323,7 @@ func processDNSInputFiles(args *dnsArgs) error {
 		for _, f := range args.Filepaths.Names {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the subdomain names file: %v", err)
+				return fmt.Errorf("failed to parse the subdomain names file: %v", err)
 			}
 
 			args.Names.InsertMany(list...)
@@ -335,7 +333,7 @@ func processDNSInputFiles(args *dnsArgs) error {
 		for _, f := range args.Filepaths.Domains {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the domain names file: %v", err)
+				return fmt.Errorf("failed to parse the domain names file: %v", err)
 			}
 
 			args.Domains.InsertMany(list...)
@@ -345,7 +343,7 @@ func processDNSInputFiles(args *dnsArgs) error {
 		for _, f := range args.Filepaths.Resolvers {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the esolver file: %v", err)
+				return fmt.Errorf("failed to parse the esolver file: %v", err)
 			}
 
 			args.Resolvers.InsertMany(list...)
@@ -359,10 +357,10 @@ func (d dnsArgs) OverrideConfig(conf *config.Config) error {
 	if d.Filepaths.Directory != "" {
 		conf.Dir = d.Filepaths.Directory
 	}
-	if len(d.Names) > 0 {
+	if d.Names.Len() > 0 {
 		conf.ProvidedNames = d.Names.Slice()
 	}
-	if len(d.Blacklist) > 0 {
+	if d.Blacklist.Len() > 0 {
 		conf.Blacklist = d.Blacklist.Slice()
 	}
 	if d.Options.Verbose {
@@ -389,9 +387,6 @@ func (d dnsArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if d.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = d.MaxDNSQueries
-	}
-	if !d.Options.MonitorResolverRate {
-		conf.MonitorResolverRate = false
 	}
 
 	// Attempt to add the provided domains to the configuration

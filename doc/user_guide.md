@@ -27,7 +27,7 @@ amass enum -d example.com
 Typical parameters for DNS enumeration:
 
 ```bash
-$ amass enum -v -src -ip -brute -min-for-recursive 2 -d example.com
+$ amass enum -v -src -ip -brute -min-for-recursive 2 -share -d example.com
 [Google] www.example.com
 [VirusTotal] ns.example.com
 ...
@@ -80,8 +80,6 @@ The intel subcommand can help you discover additional root domain names associat
 | -list | Print the names of all available data sources | amass intel -list |
 | -log | Path to the log file where errors will be written | amass intel -log amass.log -whois -d example.com |
 | -max-dns-queries | Maximum number of concurrent DNS queries | amass intel -max-dns-queries 200 -whois -d example.com |
-| -noresolvrate | Disable resolver rate monitoring | amass intel -cidr 104.154.0.0/15 -noresolvrate |
-| -noresolvscore | Disable resolver reliability scoring | amass intel -cidr 104.154.0.0/15 -noresolvscore |
 | -o | Path to the text output file | amass intel -o out.txt -whois -d example.com |
 | -org | Search string provided against AS description information | amass intel -org Facebook |
 | -p | Ports separated by commas (default: 80, 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
@@ -123,14 +121,13 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -noalts | Disable generation of altered names | amass enum -noalts -d example.com |
 | -nolocaldb | Disable saving data into a local database | amass enum -nolocaldb -d example.com |
 | -norecursive | Turn off recursive brute forcing | amass enum -brute -norecursive -d example.com |
-| -noresolvrate | Disable resolver rate monitoring | amass enum -d example.com -noresolvrate |
-| -noresolvscore | Disable resolver reliability scoring | amass enum -d example.com -noresolvscore |
 | -o | Path to the text output file | amass enum -o out.txt -d example.com |
 | -oA | Path prefix used for naming all output files | amass enum -oA amass_scan -d example.com |
 | -passive | A purely passive mode of execution | amass enum --passive -d example.com |
 | -p | Ports separated by commas (default: 443) | amass enum -d example.com -p 443,8080 |
 | -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass enum -r 8.8.8.8,1.1.1.1 -d example.com |
 | -rf | Path to a file providing preferred DNS resolvers | amass enum -rf data/resolvers.txt -d example.com |
+| -share | Share findings with data source providers | amass enum -share -config config.ini -d example.com |
 | -src | Print data sources for the discovered names | amass enum -src -d example.com |
 | -timeout | Number of minutes to execute the enumeration | amass enum -timeout 30 -d example.com |
 | -w | Path to a different wordlist file | amass enum -brute -w wordlist.txt -d example.com |
@@ -209,11 +206,13 @@ If you decide to use an Amass configuration file, it will be automatically disco
 
 You will need a config file to use your API keys with Amass. See the [Example Configuration File](../examples/config.ini) for more details.
 
-Amass automatically tries to discover the configuration file in the following locations:
+The location of the configuration file can be specified using the `-config` flag or the `AMASS_CONFIG` environment variable.
+
+Amass automatically tries to discover the configuration file (named `config.ini`) in the following locations:
 
 | Operating System | Path |
 | ---------------- | ---- |
-| Linux / Unix | `$XDG_CONFIG_HOME/amass/config.ini` or `$HOME/.config/amass/config.ini` |
+| Linux / Unix | `$XDG_CONFIG_HOME/amass/config.ini` or `$HOME/.config/amass/config.ini` or `/etc/amass/config.ini` |
 | Windows | `%AppData%\amass\config.ini` |
 | OSX | `$HOME/Library/Application Support/amass/config.ini` |
 
@@ -250,8 +249,6 @@ Note that these locations are based on the [output directory](#the-output-direct
 | Option | Description |
 |--------|-------------|
 | resolver | The IP address of a DNS resolver and used globally by the amass package |
-| score_resolvers | Toggle resolver reliability scoring |
-| monitor_resolver_rate | Toggle resolver rate monitoring |
 
 ### The blacklisted Section
 

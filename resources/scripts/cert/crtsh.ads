@@ -7,49 +7,43 @@ name = "Crtsh"
 type = "cert"
 
 function start()
-    setratelimit(2)
+    set_rate_limit(3)
 end
 
 function vertical(ctx, domain)
-    local resp, err = request(ctx, {
-        ['url']=buildurl(domain),
-        headers={['Content-Type']="application/json"},
-    })
+    local vurl = "https://crt.sh/?q=" .. domain .. "&output=json"
+
+    local resp, err = request(ctx, {['url']=vurl})
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
+        return
+    end
+    resp = "{\"subdomains\":" .. resp .. "}"
+
+    local d = json.decode(resp)
+    if (d == nil or d.subdomains == nil or #(d.subdomains) == 0) then
         return
     end
 
-    dec = json.decode(resp)
-    if (dec == nil or #dec == 0) then
-        return
-    end
+    for _, r in pairs(d.subdomains) do
+        new_name(ctx, r['common_name'])
 
-    for i, r in pairs(dec) do
-        local parts = split(r.name_value, "\n")
-        if #parts == 0 then
-            table.insert(parts, r.name_value)
-        end
-
-        for j, name in pairs(parts) do
-            newname(ctx, name)
+        for _, n in pairs(split(r['name_value'], "\\n")) do
+            new_name(ctx, n)
         end
     end
-end
-
-function buildurl(domain)
-    return "https://crt.sh/?q=%25." .. domain .. "&output=json"
 end
 
 function split(str, delim)
-    local result = {}
     local pattern = "[^%" .. delim .. "]+"
 
     local matches = find(str, pattern)
     if (matches == nil or #matches == 0) then
-        return result
+        return {str}
     end
 
-    for i, match in pairs(matches) do
+    local result = {}
+    for _, match in pairs(matches) do
         table.insert(result, match)
     end
 

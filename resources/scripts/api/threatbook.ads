@@ -7,7 +7,7 @@ name = "ThreatBook"
 type = "api"
 
 function start()
-    setratelimit(5)
+    set_rate_limit(1)
 end
 
 function check()
@@ -34,11 +34,9 @@ function vertical(ctx, domain)
         return
     end
 
-    local resp, err = request(ctx, {
-        url=verturl(domain, key),
-        headers={['Content-Type']="application/json"},
-    })
+    local resp, err = request(ctx, {['url']=build_url(domain, c.key)})
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
         return
     end
 
@@ -48,14 +46,10 @@ function vertical(ctx, domain)
     end
 
     for i, sub in pairs(d.sub_domains.data) do
-        newname(ctx, sub)
+        new_name(ctx, sub)
     end
 end
 
-function verturl(domain, key)
+function build_url(domain, key)
     return "https://api.threatbook.cn/v3/domain/sub_domains?apikey=" .. key .. "&resource=" .. domain
-end
-
-function cacheurl(domain)
-    return "https://api.threatbook.cn/v3/domain/sub_domains?resource=" .. domain
 end

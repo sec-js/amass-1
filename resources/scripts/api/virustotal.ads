@@ -1,4 +1,4 @@
--- Copyright 2017-2021 Jeff Foley. All rights reserved.
+-- Copyright 2020-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local json = require("json")
@@ -7,7 +7,20 @@ name = "VirusTotal"
 type = "api"
 
 function start()
-    setratelimit(10)
+    set_rate_limit(10)
+end
+
+function check()
+    local c
+    local cfg = datasrc_config()
+    if cfg ~= nil then
+        c = cfg.credentials
+    end
+
+    if (c ~= nil and c.key ~= nil and c.key ~= "") then
+        return true
+    end
+    return false
 end
 
 function vertical(ctx, domain)
@@ -17,62 +30,32 @@ function vertical(ctx, domain)
         c = cfg.credentials
     end
 
-    local haskey = true
     if (c == nil or c.key == nil or c.key == "") then
-        haskey = false
+        return
     end
 
-    local vurl = buildurl(domain)
-    if haskey then
-        vurl = apiurl(domain, c.key)
-    end
-
-    local resp, err = request(ctx, {
-        url=vurl,
-        headers={['Content-Type']="application/json"},
-    })
+    local vurl = build_url(domain, c.key)
+    local resp, err = request(ctx, {['url']=vurl})
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
         return
     end
 
     local d = json.decode(resp)
-    if haskey then
-        if d['response_code'] ~= 1 then
-            log(ctx, name .. ": " .. vurl .. ": Response code " .. d['response_code'] .. ": " .. d['verbose_msg'])
-            return
-        end
-
-        for i, sub in pairs(d.subdomains) do
-            sendnames(ctx, sub)
-        end
-    else
-        for i, data in pairs(d.data) do
-            if data.type == "domain" then
-                sendnames(ctx, data.id)
-            end
-        end
-    end
-end
-
-function buildurl(domain)
-    return "https://www.virustotal.com/ui/domains/" .. domain .. "/subdomains?limit=40"
-end
-
-function apiurl(domain, key)
-    return "https://www.virustotal.com/vtapi/v2/domain/report?apikey=" .. key .. "&domain=" .. domain
-end
-
-function sendnames(ctx, content)
-    local names = find(content, subdomainre)
-    if names == nil then
+    if d == nil or d.response_code ~= 1 then
+        log(ctx, name .. ": " .. vurl .. ": HTTP status " .. d.response_code .. ": " .. d.verbose_msg)
         return
     end
 
-    local found = {}
-    for i, v in pairs(names) do
-        if found[v] == nil then
-            newname(ctx, v)
-            found[v] = true
-        end
+    if d.subdomains == nil then
+        return
     end
+
+    for _, sub in pairs(d.subdomains) do
+        new_name(ctx, sub)
+    end
+end
+
+function build_url(domain, key)
+    return "https://www.virustotal.com/vtapi/v2/domain/report?domain=" .. domain .. "&apikey=" .. key
 end

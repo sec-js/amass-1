@@ -5,16 +5,16 @@ name = "IPv4Info"
 type = "scrape"
 
 function start()
-    setratelimit(1)
+    set_rate_limit(2)
 end
 
 function vertical(ctx, domain)
-    local path = getpath(ctx, domain)
+    local path = get_path(ctx, domain)
     if path == "" then
         return
     end
 
-    local token = gettoken(ctx, domain, path)
+    local token = get_token(ctx, domain, path)
     if token == "" then
         return
     end
@@ -22,10 +22,11 @@ function vertical(ctx, domain)
     local u = "http://ipv4info.com/subdomains/" .. token .. "/" .. domain .. ".html"
     local resp, err = request(ctx, {['url']=u})
     if (err ~= nil and err ~= "") then
+        log(ctx, "vertical request to service failed: " .. err)
         return
     end
 
-    sendnames(ctx, resp)
+    send_names(ctx, resp)
     -- Attempt to scrape additional pages of subdomain names
     local pagenum = 1
     while(true) do
@@ -35,20 +36,21 @@ function vertical(ctx, domain)
         local page = "page" .. tostring(pagenum)
         local key = domain .. page
        
-        resp = nextpage(ctx, domain, last, page)
+        resp = next_page(ctx, domain, last, page)
         if (resp == nil or resp == "") then
             break
         end
 
-        sendnames(ctx, resp)
+        send_names(ctx, resp)
         pagenum = pagenum + 1
     end
 end
 
-function getpath(ctx, domain)
+function get_path(ctx, domain)
     local u = "http://ipv4info.com/search/" .. domain
     local page, err = request(ctx, {['url']=u})
     if (err ~= nil and err ~= "") then
+        log(ctx, "get_path request to service failed: " .. err)
         return ""
     end
 
@@ -60,14 +62,20 @@ function getpath(ctx, domain)
     return match[1]
 end
 
-function gettoken(ctx, domain, path)
+function get_token(ctx, domain, path)
     local u = "http://ipv4info.com" .. path
     local page, err = request(ctx, {['url']=u})
     if (err ~= nil and err ~= "") then
+        log(ctx, "get_token request to service failed: " .. err)
         return ""
     end
 
-    local match = submatch(page, "/dns/(.*?)/" .. domain)
+    local matches = submatch(page, "/dns/(.*?)/" .. domain)
+    if (matches == nil or #matches == 0) then
+        return ""
+    end
+
+    local match = matches[1]
     if (match == nil or #match < 2) then
         return ""
     end
@@ -75,7 +83,7 @@ function gettoken(ctx, domain, path)
     return match[2]
 end
 
-function nextpage(ctx, domain, resp, page)
+function next_page(ctx, domain, resp, page)
     local match = find(resp, "/subdomains/(.*)/" .. page .. "/" .. domain .. ".html")
     if (match == nil or #match == 0) then
         return ""
@@ -84,23 +92,9 @@ function nextpage(ctx, domain, resp, page)
     local u = "http://ipv4info.com" .. match[1]
     local page, err = request(ctx, {['url']=u})
     if (err ~= nil and err ~= "") then
+        log(ctx, "next_page request to service failed: " .. err)
         return ""
     end
 
     return page
-end
-
-function sendnames(ctx, content)
-    local names = find(content, subdomainre)
-    if names == nil then
-        return
-    end
-
-    local found = {}
-    for i, v in pairs(names) do
-        if found[v] == nil then
-            newname(ctx, v)
-            found[v] = true
-        end
-    end
 end

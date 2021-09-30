@@ -1,14 +1,10 @@
--- Copyright 2017-2021 Jeff Foley. All rights reserved.
+-- Copyright 2020-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 name = "Alterations"
 type = "alt"
 
 ldh_chars = "_abcdefghijklmnopqrstuvwxyz0123456789-"
-
-function start()
-    setratelimit(1)
-end
 
 function resolved(ctx, name, domain, records)
     local nparts = split(name, ".")
@@ -23,58 +19,40 @@ function resolved(ctx, name, domain, records)
         return
     end
 
-    makenames(ctx, cfg.alterations, name)
+    make_names(ctx, cfg.alterations, name)
 end
 
-function makenames(ctx, cfg, name)
+function make_names(ctx, cfg, name)
     local words = alt_wordlist(ctx)
 
     if cfg['flip_words'] then
-        for i, n in pairs(flip_words(name, words)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(flip_words(name, words)) do
+            new_name(ctx, n)
         end
     end
     if cfg['flip_numbers'] then
-        for i, n in pairs(flip_numbers(name)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(flip_numbers(name)) do
+            new_name(ctx, n)
         end
     end
     if cfg['add_numbers'] then
-        for i, n in pairs(append_numbers(name)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(append_numbers(name)) do
+            new_name(ctx, n)
         end
     end
     if cfg['add_words'] then
-        for i, n in pairs(add_prefix_word(name, words)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(add_prefix_word(name, words)) do
+            new_name(ctx, n)
         end
-        for i, n in pairs(add_suffix_word(name, words)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(add_suffix_word(name, words)) do
+            new_name(ctx, n)
         end
     end
 
     local distance = cfg['edit_distance']
     if distance > 0 then
-        for i, n in pairs(fuzzy_label_searches(name, distance)) do
-            local expired = sendnames(ctx, n)
-            if expired then
-                return
-            end
+        for _, n in pairs(fuzzy_label_searches(name, distance)) do
+            new_name(ctx, n)
         end
     end
 end
@@ -91,12 +69,12 @@ function flip_words(name, words)
     end
 
     local post = partial_join(parts, "-", 2, #parts)
-    for i, word in pairs(words) do
+    for _, word in pairs(words) do
         set_insert(s, word .. "-" .. post .. "." .. base)
     end
 
     local pre = partial_join(parts, "-", 1, #parts - 1)
-    for i, word in pairs(words) do
+    for _, word in pairs(words) do
         set_insert(s, pre .. "-" .. word .. "." .. base)
     end
 
@@ -122,8 +100,8 @@ function flip_numbers(name)
 
         -- Create an entry with the number removed
         set_insert(s, pre .. post .. "." .. base)
-        local seq = numseq(tonumber(string.sub(hostname, b, e)))
-        for i, sn in pairs(seq) do
+        local seq = num_seq(tonumber(string.sub(hostname, b, e)))
+        for _, sn in pairs(seq) do
             set_insert(s, pre .. sn .. post .. "." .. base)
         end
     end
@@ -131,7 +109,7 @@ function flip_numbers(name)
     return set_elements(s)
 end
 
-function numseq(num)
+function num_seq(num)
     local s = {}
 
     local start = num - 50
@@ -167,7 +145,7 @@ function add_prefix_word(name, words)
     local hostname = parts[1]
     local base = partial_join(parts, ".", 2, #parts)
 
-    for i, w in pairs(words) do
+    for _, w in pairs(words) do
         set_insert(s, w .. hostname .. "." .. base)
         set_insert(s, w .. "-" .. hostname .. "." .. base)
     end
@@ -181,7 +159,7 @@ function add_suffix_word(name, words)
     local hostname = parts[1]
     local base = partial_join(parts, ".", 2, #parts)
 
-    for i, w in pairs(words) do
+    for _, w in pairs(words) do
         set_insert(s, hostname .. w .. "." .. base)
         set_insert(s, hostname .. "-" .. w .. "." .. base)
     end
@@ -204,7 +182,7 @@ function fuzzy_label_searches(name, distance)
     end
 
     local results = {}
-    for i, n in pairs(set_elements(s)) do
+    for _, n in pairs(set_elements(s)) do
         set_insert(results, n .. "." .. base)
     end
 
@@ -351,24 +329,4 @@ function set_elements(tb)
     end
 
     return result
-end
-
-function sendnames(ctx, content)
-    local names = find(content, subdomainre)
-    if names == nil then
-        return false
-    end
-
-    local found = {}
-    for i, v in pairs(names) do
-        if found[v] == nil then
-            local expired = newname(ctx, v)
-            if expired then
-                return expired
-            end
-            found[v] = true
-        end
-    end
-
-    return false
 end

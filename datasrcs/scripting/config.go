@@ -1,4 +1,4 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright 2020-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package scripting
@@ -149,86 +149,63 @@ func (s *Script) dataSourceConfig(L *lua.LState) int {
 
 // Wrapper so that scripts can check if a subdomain name is in scope.
 func (s *Script) inScope(L *lua.LState) int {
-	ctx, err := extractContext(L.CheckUserData(1))
-	if err != nil {
-		L.Push(lua.LFalse)
-		return 1
+	result := lua.LFalse
+
+	if ctx, err := extractContext(L.CheckUserData(1)); err == nil {
+		if cfg, _, err := requests.ContextConfigBus(ctx); err == nil {
+			if sub := L.CheckString(2); sub != "" && cfg.IsDomainInScope(sub) {
+				result = lua.LTrue
+			}
+		}
 	}
 
-	cfg, _, err := requests.ContextConfigBus(ctx)
-	if err != nil {
-		L.Push(lua.LFalse)
-		return 1
-	}
-
-	lv := L.Get(2)
-	if sub, ok := lv.(lua.LString); ok && cfg.IsDomainInScope(string(sub)) {
-		L.Push(lua.LTrue)
-		return 1
-	}
-
-	L.Push(lua.LFalse)
+	L.Push(result)
 	return 1
 }
 
 // Wrapper so that scripts can obtain the brute force wordlist for the current enumeration.
 func (s *Script) bruteWordlist(L *lua.LState) int {
-	ctx, err := extractContext(L.CheckUserData(1))
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	cfg, _, err := requests.ContextConfigBus(ctx)
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
 	tb := L.NewTable()
-	for _, word := range cfg.Wordlist {
-		tb.Append(lua.LString(word))
+
+	if ctx, err := extractContext(L.CheckUserData(1)); err == nil {
+		if cfg, _, err := requests.ContextConfigBus(ctx); err == nil {
+			for _, word := range cfg.Wordlist {
+				tb.Append(lua.LString(word))
+			}
+		}
 	}
 
-	L.Push(tb)
+	if tb.Len() > 0 {
+		L.Push(tb)
+	} else {
+		L.Push(lua.LNil)
+	}
 	return 1
 }
 
 // Wrapper so that scripts can obtain the alteration wordlist for the current enumeration.
 func (s *Script) altWordlist(L *lua.LState) int {
-	ctx, err := extractContext(L.CheckUserData(1))
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
-	cfg, _, err := requests.ContextConfigBus(ctx)
-	if err != nil {
-		L.Push(lua.LNil)
-		return 1
-	}
-
 	tb := L.NewTable()
-	for _, word := range cfg.AltWordlist {
-		tb.Append(lua.LString(word))
+
+	if ctx, err := extractContext(L.CheckUserData(1)); err == nil {
+		if cfg, _, err := requests.ContextConfigBus(ctx); err == nil {
+			for _, word := range cfg.AltWordlist {
+				tb.Append(lua.LString(word))
+			}
+		}
 	}
 
-	L.Push(tb)
+	if tb.Len() > 0 {
+		L.Push(tb)
+	} else {
+		L.Push(lua.LNil)
+	}
 	return 1
 }
 
 // Wrapper so scripts can set the data source rate limit.
 func (s *Script) setRateLimit(L *lua.LState) int {
-	lv := L.Get(1)
-	if lv == nil {
-		return 0
-	}
-
-	if num, ok := lv.(lua.LNumber); ok {
-		sec := int(num)
-
-		s.seconds = sec
-	}
+	s.seconds = L.CheckInt(1)
 	return 0
 }
 
@@ -248,17 +225,16 @@ func (s *Script) checkRateLimit(L *lua.LState) int {
 func (s *Script) outputdir(L *lua.LState) int {
 	var dir string
 
-	ctx, err := extractContext(L.CheckUserData(1))
-	if err != nil {
+	if ctx, err := extractContext(L.CheckUserData(1)); err == nil {
+		if cfg, _, err := requests.ContextConfigBus(ctx); err == nil {
+			dir = config.OutputDirectory(cfg.Dir)
+		}
+	}
+
+	if dir != "" {
+		L.Push(lua.LString(dir))
+	} else {
 		L.Push(lua.LNil)
-		return 1
 	}
-
-	cfg, _, err := requests.ContextConfigBus(ctx)
-	if err == nil {
-		dir = config.OutputDirectory(cfg.Dir)
-	}
-
-	L.Push(lua.LString(dir))
 	return 1
 }

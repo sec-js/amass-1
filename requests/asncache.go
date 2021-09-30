@@ -72,19 +72,15 @@ func (c *ASNCache) Update(req *ASNRequest) {
 	c.Lock()
 	defer c.Unlock()
 
-	if _, found := c.cache[req.ASN]; !found {
+	as, found := c.cache[req.ASN]
+	if !found {
 		c.cache[req.ASN] = req
-		if req.Netblocks == nil {
-			req.Netblocks = stringset.New(req.Prefix)
+		if len(req.Netblocks) == 0 {
+			req.Netblocks = []string{req.Prefix}
 		}
 		return
 	}
-
-	as := c.cache[req.ASN]
 	// This is additional information for an ASN entry
-	if as.Prefix == "" && req.Prefix != "" {
-		as.Prefix = req.Prefix
-	}
 	if as.CC == "" && req.CC != "" {
 		as.CC = req.CC
 	}
@@ -94,25 +90,34 @@ func (c *ASNCache) Update(req *ASNRequest) {
 	if as.AllocationDate.IsZero() && !req.AllocationDate.IsZero() {
 		as.AllocationDate = req.AllocationDate
 	}
-	if as.Description == "" && req.Description != "" {
+	if len(as.Description) < len(req.Description) {
 		as.Description = req.Description
 	}
-	if req.Netblocks == nil {
-		as.Netblocks.Union(stringset.New(req.Prefix))
-	} else {
-		as.Netblocks.Union(req.Netblocks)
+
+	nb := stringset.New(req.Prefix)
+	defer nb.Close()
+
+	if len(req.Netblocks) > 0 {
+		nb.InsertMany(req.Netblocks...)
 	}
+	as.Netblocks = nb.Slice()
 }
 
 // ASNSearch return the cached ASN / netblock info associated with the provided asn parameter,
 // or nil when not found in the cache.
 func (c *ASNCache) ASNSearch(asn int) *ASNRequest {
+	c.Lock()
+	defer c.Unlock()
+
 	return c.cache[asn]
 }
 
 // AddrSearch returns the cached ASN / netblock info that the addr parameter belongs in,
 // or nil when not found in the cache.
 func (c *ASNCache) AddrSearch(addr string) *ASNRequest {
+	c.Lock()
+	defer c.Unlock()
+
 	ip := net.ParseIP(addr)
 	if ip == nil {
 		return nil
@@ -140,12 +145,17 @@ func (c *ASNCache) AddrSearch(addr string) *ASNRequest {
 		}
 	}
 
+	prefix := entry.IPNet.String()
+	netblocks := stringset.New(prefix)
+	defer netblocks.Close()
+
+	netblocks.InsertMany(entry.Data.Netblocks...)
 	return &ASNRequest{
 		Address:     addr,
 		ASN:         entry.Data.ASN,
 		CC:          entry.Data.CC,
-		Prefix:      entry.IPNet.String(),
-		Netblocks:   stringset.New(entry.IPNet.String()),
+		Prefix:      prefix,
+		Netblocks:   netblocks.Slice(),
 		Description: entry.Data.Description,
 		Tag:         RIR,
 		Source:      "RIR",
@@ -153,9 +163,6 @@ func (c *ASNCache) AddrSearch(addr string) *ASNRequest {
 }
 
 func (c *ASNCache) searchRangerData(ip net.IP) *cacheRangerEntry {
-	c.RLock()
-	defer c.RUnlock()
-
 	if entries, err := c.ranger.ContainingNetworks(ip); err == nil {
 		for _, e := range entries {
 			if entry, ok := e.(*cacheRangerEntry); ok {
@@ -163,18 +170,15 @@ func (c *ASNCache) searchRangerData(ip net.IP) *cacheRangerEntry {
 			}
 		}
 	}
-
 	return nil
 }
 
 func (c *ASNCache) rawData2Ranger(ip net.IP) {
-	c.Lock()
-	defer c.Unlock()
-
 	var cidr *net.IPNet
 	var data *ASNRequest
+
 	for _, record := range c.cache {
-		for netblock := range record.Netblocks {
+		for _, netblock := range record.Netblocks {
 			_, ipnet, err := net.ParseCIDR(netblock)
 			if err != nil {
 				continue

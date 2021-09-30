@@ -41,38 +41,38 @@ type enumArgs struct {
 	Addresses         format.ParseIPs
 	ASNs              format.ParseInts
 	CIDRs             format.ParseCIDRs
-	AltWordList       stringset.Set
-	AltWordListMask   stringset.Set
-	BruteWordList     stringset.Set
-	BruteWordListMask stringset.Set
-	Blacklist         stringset.Set
-	Domains           stringset.Set
-	Excluded          stringset.Set
-	Included          stringset.Set
+	AltWordList       *stringset.Set
+	AltWordListMask   *stringset.Set
+	BruteWordList     *stringset.Set
+	BruteWordListMask *stringset.Set
+	Blacklist         *stringset.Set
+	Domains           *stringset.Set
+	Excluded          *stringset.Set
+	Included          *stringset.Set
 	Interface         string
 	MaxDNSQueries     int
 	MinForRecursive   int
-	Names             stringset.Set
+	Names             *stringset.Set
 	Ports             format.ParseInts
-	Resolvers         stringset.Set
+	Resolvers         *stringset.Set
 	Timeout           int
 	Options           struct {
-		Active              bool
-		BruteForcing        bool
-		DemoMode            bool
-		IPs                 bool
-		IPv4                bool
-		IPv6                bool
-		ListSources         bool
-		MonitorResolverRate bool
-		NoAlts              bool
-		NoColor             bool
-		NoLocalDatabase     bool
-		NoRecursive         bool
-		Passive             bool
-		Silent              bool
-		Sources             bool
-		Verbose             bool
+		Active          bool
+		BruteForcing    bool
+		DemoMode        bool
+		IPs             bool
+		IPv4            bool
+		IPv6            bool
+		ListSources     bool
+		NoAlts          bool
+		NoColor         bool
+		NoLocalDatabase bool
+		NoRecursive     bool
+		Passive         bool
+		Share           bool
+		Silent          bool
+		Sources         bool
+		Verbose         bool
 	}
 	Filepaths struct {
 		AllFilePrefix    string
@@ -95,19 +95,19 @@ type enumArgs struct {
 
 func defineEnumArgumentFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.Var(&args.Addresses, "addr", "IPs and ranges (192.168.1.1-254) separated by commas")
-	enumFlags.Var(&args.AltWordListMask, "awm", "\"hashcat-style\" wordlist masks for name alterations")
+	enumFlags.Var(args.AltWordListMask, "awm", "\"hashcat-style\" wordlist masks for name alterations")
 	enumFlags.Var(&args.ASNs, "asn", "ASNs separated by commas (can be used multiple times)")
 	enumFlags.Var(&args.CIDRs, "cidr", "CIDRs separated by commas (can be used multiple times)")
-	enumFlags.Var(&args.Blacklist, "bl", "Blacklist of subdomain names that will not be investigated")
-	enumFlags.Var(&args.BruteWordListMask, "wm", "\"hashcat-style\" wordlist masks for DNS brute forcing")
-	enumFlags.Var(&args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
-	enumFlags.Var(&args.Excluded, "exclude", "Data source names separated by commas to be excluded")
-	enumFlags.Var(&args.Included, "include", "Data source names separated by commas to be included")
+	enumFlags.Var(args.Blacklist, "bl", "Blacklist of subdomain names that will not be investigated")
+	enumFlags.Var(args.BruteWordListMask, "wm", "\"hashcat-style\" wordlist masks for DNS brute forcing")
+	enumFlags.Var(args.Domains, "d", "Domain names separated by commas (can be used multiple times)")
+	enumFlags.Var(args.Excluded, "exclude", "Data source names separated by commas to be excluded")
+	enumFlags.Var(args.Included, "include", "Data source names separated by commas to be included")
 	enumFlags.StringVar(&args.Interface, "iface", "", "Provide the network interface to send traffic through")
 	enumFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of DNS queries per second")
 	enumFlags.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing (Default: 1)")
 	enumFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
-	enumFlags.Var(&args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
+	enumFlags.Var(args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
 	enumFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
 
@@ -119,12 +119,12 @@ func defineEnumOptionFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	enumFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
 	enumFlags.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")
-	enumFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	enumFlags.BoolVar(&args.Options.NoAlts, "noalts", false, "Disable generation of altered names")
 	enumFlags.BoolVar(&args.Options.NoColor, "nocolor", false, "Disable colorized output")
 	enumFlags.BoolVar(&args.Options.NoLocalDatabase, "nolocaldb", false, "Disable saving data into a local database")
 	enumFlags.BoolVar(&args.Options.NoRecursive, "norecursive", false, "Turn off recursive brute forcing")
 	enumFlags.BoolVar(&args.Options.Passive, "passive", false, "Disable DNS resolution of names and dependent features")
+	enumFlags.BoolVar(&args.Options.Share, "share", false, "Share findings with data source providers")
 	enumFlags.BoolVar(&args.Options.Silent, "silent", false, "Disable all output during execution")
 	enumFlags.BoolVar(&args.Options.Sources, "src", false, "Print data sources for the discovered names")
 	enumFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
@@ -248,7 +248,6 @@ func runEnumCommand(clArgs []string) {
 	close(done)
 	wg.Wait()
 
-	//e.Graph.DumpGraph()
 	// If necessary, handle graph database migration
 	if !cfg.Passive && len(e.Sys.GraphDatabases()) > 0 {
 		fmt.Fprintf(color.Error, "\n%s\n", green("The enumeration has finished"))
@@ -258,11 +257,18 @@ func runEnumCommand(clArgs []string) {
 			fmt.Fprintf(color.Error, "%s%s%s\n",
 				yellow("Discoveries are being migrated into the "), yellow(g.String()), yellow(" database"))
 
-			if err := e.Graph.MigrateEvents(g, e.Config.UUID.String()); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+
+			if err := e.Graph.MigrateEvents(ctx, g, e.Config.UUID.String()); err != nil {
 				fmt.Fprintf(color.Error, "%s%s%s%s\n",
 					red("The database migration to "), red(g.String()), red(" failed: "), red(err.Error()))
 			}
 		}
+	}
+
+	if cfg.Share {
+		shareFindings(e, cfg)
 	}
 }
 
@@ -328,8 +334,8 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 	if args.BruteWordListMask.Len() > 0 {
 		args.BruteWordList.Union(args.BruteWordListMask)
 	}
-	if (len(args.Excluded) > 0 || args.Filepaths.ExcludedSrcs != "") &&
-		(len(args.Included) > 0 || args.Filepaths.IncludedSrcs != "") {
+	if (args.Excluded.Len() > 0 || args.Filepaths.ExcludedSrcs != "") &&
+		(args.Included.Len() > 0 || args.Filepaths.IncludedSrcs != "") {
 		r.Fprintln(color.Error, "Cannot provide both include and exclude arguments")
 		commandUsage(enumUsageMsg, enumCommand, enumBuf)
 		os.Exit(1)
@@ -343,7 +349,7 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 	// Check if a configuration file was provided, and if so, load the settings
 	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		// Check if a config file was provided that has DNS resolvers specified
-		if len(cfg.Resolvers) > 0 && len(args.Resolvers) == 0 {
+		if len(cfg.Resolvers) > 0 && args.Resolvers.Len() == 0 {
 			args.Resolvers = stringset.New(cfg.Resolvers...)
 		}
 	} else if args.Filepaths.ConfigFile != "" {
@@ -504,19 +510,22 @@ func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *req
 	// This filter ensures that we only get new names
 	known := filter.NewBloomFilter(1 << 22)
 	// The function that obtains output from the enum and puts it on the channel
-	extract := func() {
-		for _, o := range ExtractOutput(e, known, true) {
+	extract := func(limit int) {
+		for _, o := range ExtractOutput(ctx, e, known, true, limit) {
 			if !e.Config.IsDomainInScope(o.Name) {
 				continue
 			}
 
 			for _, ch := range outputs {
+				if !o.Complete(e.Config.Passive) {
+					e.Config.Log.Printf("Incomplete output: %v", o)
+				}
 				ch <- o
 			}
 		}
 	}
 
-	t := time.NewTicker(15 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -524,10 +533,10 @@ func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *req
 			return
 		case <-done:
 			// Check one last time
-			extract()
+			extract(0)
 			return
 		case <-t.C:
-			extract()
+			extract(100)
 		}
 	}
 }
@@ -594,7 +603,7 @@ func processEnumInputFiles(args *enumArgs) error {
 		for _, f := range args.Filepaths.BruteWordlist {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the brute force wordlist file: %v", err)
+				return fmt.Errorf("failed to parse the brute force wordlist file: %v", err)
 			}
 			args.BruteWordList.InsertMany(list...)
 		}
@@ -603,7 +612,7 @@ func processEnumInputFiles(args *enumArgs) error {
 		for _, f := range args.Filepaths.AltWordlist {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the alterations wordlist file: %v", err)
+				return fmt.Errorf("failed to parse the alterations wordlist file: %v", err)
 			}
 			args.AltWordList.InsertMany(list...)
 		}
@@ -611,21 +620,21 @@ func processEnumInputFiles(args *enumArgs) error {
 	if args.Filepaths.Blacklist != "" {
 		list, err := config.GetListFromFile(args.Filepaths.Blacklist)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the blacklist file: %v", err)
+			return fmt.Errorf("failed to parse the blacklist file: %v", err)
 		}
 		args.Blacklist.InsertMany(list...)
 	}
 	if args.Filepaths.ExcludedSrcs != "" {
 		list, err := config.GetListFromFile(args.Filepaths.ExcludedSrcs)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the exclude file: %v", err)
+			return fmt.Errorf("failed to parse the exclude file: %v", err)
 		}
 		args.Excluded.InsertMany(list...)
 	}
 	if args.Filepaths.IncludedSrcs != "" {
 		list, err := config.GetListFromFile(args.Filepaths.IncludedSrcs)
 		if err != nil {
-			return fmt.Errorf("Failed to parse the include file: %v", err)
+			return fmt.Errorf("failed to parse the include file: %v", err)
 		}
 		args.Included.InsertMany(list...)
 	}
@@ -633,7 +642,7 @@ func processEnumInputFiles(args *enumArgs) error {
 		for _, f := range args.Filepaths.Names {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the subdomain names file: %v", err)
+				return fmt.Errorf("failed to parse the subdomain names file: %v", err)
 			}
 			args.Names.InsertMany(list...)
 		}
@@ -642,7 +651,7 @@ func processEnumInputFiles(args *enumArgs) error {
 		for _, f := range args.Filepaths.Domains {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the domain names file: %v", err)
+				return fmt.Errorf("failed to parse the domain names file: %v", err)
 			}
 			args.Domains.InsertMany(list...)
 		}
@@ -651,7 +660,7 @@ func processEnumInputFiles(args *enumArgs) error {
 		for _, f := range args.Filepaths.Resolvers {
 			list, err := config.GetListFromFile(f)
 			if err != nil {
-				return fmt.Errorf("Failed to parse the esolver file: %v", err)
+				return fmt.Errorf("failed to parse the esolver file: %v", err)
 			}
 			args.Resolvers.InsertMany(list...)
 		}
@@ -661,6 +670,9 @@ func processEnumInputFiles(args *enumArgs) error {
 
 // Setup the amass enumeration settings
 func (e enumArgs) OverrideConfig(conf *config.Config) error {
+	if e.Options.Share {
+		conf.Share = true
+	}
 	if len(e.Addresses) > 0 {
 		conf.Addresses = e.Addresses
 	}
@@ -705,9 +717,13 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if e.Options.Active {
 		conf.Active = true
+		conf.Passive = false
 	}
 	if e.Options.Passive {
 		conf.Passive = true
+		conf.Active = false
+		conf.BruteForcing = false
+		conf.Alterations = false
 	}
 	if e.Blacklist.Len() > 0 {
 		conf.Blacklist = e.Blacklist.Slice()
@@ -721,11 +737,8 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	if e.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = e.MaxDNSQueries
 	}
-	if !e.Options.MonitorResolverRate {
-		conf.MonitorResolverRate = false
-	}
 
-	if len(e.Included) > 0 {
+	if e.Included.Len() > 0 {
 		conf.SourceFilter.Include = true
 		// Check if brute forcing and alterations should be added
 		if conf.Alterations {
@@ -735,7 +748,7 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 			e.Included.Insert(requests.BRUTE)
 		}
 		conf.SourceFilter.Sources = e.Included.Slice()
-	} else if len(e.Excluded) > 0 || conf.Alterations || conf.BruteForcing {
+	} else if e.Excluded.Len() > 0 || conf.Alterations || conf.BruteForcing {
 		conf.SourceFilter.Include = false
 		// Check if brute forcing and alterations should be added
 		if conf.Alterations {
