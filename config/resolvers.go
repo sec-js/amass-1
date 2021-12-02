@@ -18,10 +18,10 @@ import (
 )
 
 // DefaultQueriesPerPublicResolver is the number of queries sent to each public DNS resolver per second.
-const DefaultQueriesPerPublicResolver = 35
+const DefaultQueriesPerPublicResolver = 5
 
 // DefaultQueriesPerBaselineResolver is the number of queries sent to each trusted DNS resolver per second.
-const DefaultQueriesPerBaselineResolver = 35
+const DefaultQueriesPerBaselineResolver = 10
 
 const minResolverReliability = 0.85
 
@@ -57,12 +57,11 @@ func init() {
 	}
 loop:
 	for _, addr := range addrs {
-		for _, baseline := range DefaultBaselineResolvers {
-			if addr == baseline {
+		for _, br := range DefaultBaselineResolvers {
+			if addr == br {
 				continue loop
 			}
 		}
-
 		PublicResolvers = append(PublicResolvers, addr)
 	}
 }
@@ -104,21 +103,21 @@ func (c *Config) loadResolverSettings(cfg *ini.File) error {
 
 	c.Resolvers = stringset.Deduplicate(sec.Key("resolver").ValueWithShadows())
 	if len(c.Resolvers) == 0 {
-		return errors.New("No resolver keys were found in the resolvers section")
+		return errors.New("no resolver keys were found in the resolvers section")
 	}
 
 	return nil
 }
 
 func (c *Config) calcDNSQueriesMax() {
-	c.MaxDNSQueries = len(c.Resolvers) * DefaultQueriesPerBaselineResolver
+	c.MaxDNSQueries = len(c.Resolvers) * DefaultQueriesPerPublicResolver
 }
 
 func getPublicDNSResolvers() ([]string, error) {
 	url := "https://public-dns.info/nameservers-all.csv"
 	page, err := http.RequestWebPage(context.Background(), url, nil, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to obtain the Public DNS csv file at %s: %v", url, err)
+		return nil, fmt.Errorf("failed to obtain the Public DNS csv file at %s: %v", url, err)
 	}
 
 	var resolvers []string

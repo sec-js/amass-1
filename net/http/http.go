@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"runtime"
@@ -24,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OWASP/Amass/v3/filter"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/net/dns"
 	"github.com/PuerkitoBio/goquery"
@@ -36,22 +33,20 @@ import (
 const (
 	// Accept is the default HTTP Accept header value used by Amass.
 	Accept = "text/html,application/json,application/xhtml+xml,application/xml;q=0.5,*/*;q=0.2"
-
 	// AcceptLang is the default HTTP Accept-Language header value used by Amass.
-	AcceptLang = "en-US,en;q=0.5"
-
-	httpTimeout      = 30 * time.Second
-	handshakeTimeout = 10 * time.Second
+	AcceptLang       = "en-US,en;q=0.5"
+	defaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36"
+	windowsUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36"
+	darwinUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_0_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36"
+	httpTimeout      = 60 * time.Second
+	handshakeTimeout = 20 * time.Second
 )
 
 var (
 	// UserAgent is the default user agent used by Amass during HTTP requests.
-	UserAgent       string
-	subRE           = dns.AnySubdomainRegex()
-	crawlRE         = regexp.MustCompile(`\.\w{2,6}($|\?|#)`)
-	crawlFileEnds   = []string{"html", "do", "action", "cgi"}
-	crawlFileStarts = []string{"js", "htm", "as", "php", "inc"}
-	nameStripRE     = regexp.MustCompile(`^u[0-9a-f]{4}|20|22|25|27|2b|2f|3d|3a|40`)
+	UserAgent   string
+	subRE       = dns.AnySubdomainRegex()
+	nameStripRE = regexp.MustCompile(`^u[0-9a-f]{4}|20|22|25|27|2b|2f|3d|3a|40`)
 )
 
 // DefaultClient is the same HTTP client used by the package methods.
@@ -82,11 +77,11 @@ func init() {
 
 	switch runtime.GOOS {
 	case "windows":
-		UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
+		UserAgent = windowsUserAgent
 	case "darwin":
-		UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
+		UserAgent = darwinUserAgent
 	default:
-		UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"
+		UserAgent = defaultUserAgent
 	}
 }
 
@@ -118,6 +113,7 @@ func RequestWebPage(ctx context.Context, u string, body io.Reader, hvals map[str
 	if body != nil {
 		method = "POST"
 	}
+
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
 		return "", err
@@ -135,56 +131,69 @@ func RequestWebPage(ctx context.Context, u string, body io.Reader, hvals map[str
 		req.Header.Set(k, v)
 	}
 
+	var in string
 	resp, err := DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
+	if err == nil {
+		defer func() { _ = resp.Body.Close() }()
 
-	in, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		err = fmt.Errorf("%d: %s", resp.StatusCode, resp.Status)
+		if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+			err = fmt.Errorf("%d: %s", resp.StatusCode, resp.Status)
+		}
+		if b, err := ioutil.ReadAll(resp.Body); err == nil {
+			in = string(b)
+		}
 	}
-	return string(in), err
+	return in, err
 }
 
-// Crawl will spider the web page at the URL argument looking for DNS names within the scope argument.
-func Crawl(ctx context.Context, u string, scope []string, max int, f filter.Filter) ([]string, error) {
+// Crawl will spider the web page at the URL argument looking for DNS names within the scope provided.
+func Crawl(ctx context.Context, u string, scope []string, max int, f *stringset.Set) ([]string, error) {
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("The context expired")
+		return nil, fmt.Errorf("the context expired")
 	default:
 	}
 
-	newScope := append([]string{}, scope...)
-
-	target := subRE.FindString(u)
-	if target != "" {
-		var found bool
-		for _, domain := range newScope {
-			if target == domain {
-				found = true
-				break
-			}
-		}
-		if !found {
-			newScope = append(newScope, target)
-		}
-	}
-
 	if f == nil {
-		f = filter.NewStringFilter()
+		f = stringset.New()
 		defer f.Close()
 	}
 
-	var count int
-	var m sync.Mutex
 	results := stringset.New()
 	defer results.Close()
 
-	g := geziyor.NewGeziyor(&geziyor.Options{
-		AllowedDomains:        newScope,
+	g := createCrawler(u, scope, max, results, f)
+	g.Client = client.NewClient(&client.Options{
+		MaxBodySize:    50 * 1024 * 1024, // 50MB
+		RetryTimes:     2,
+		RetryHTTPCodes: []int{408, 500, 502, 503, 504, 522, 524},
+	})
+	g.Client.Client = http.DefaultClient
+
+	done := make(chan struct{}, 2)
+	go func() {
+		g.Start()
+		close(done)
+	}()
+
+	var err error
+	select {
+	case <-ctx.Done():
+		err = fmt.Errorf("the context expired during the crawl of %s", u)
+	case <-done:
+		if len(results.Slice()) == 0 {
+			err = fmt.Errorf("no DNS names were discovered during the crawl of %s", u)
+		}
+	}
+
+	return results.Slice(), err
+}
+
+func createCrawler(u string, scope []string, max int, results, filter *stringset.Set) *geziyor.Geziyor {
+	var count int
+	var m sync.Mutex
+
+	return geziyor.NewGeziyor(&geziyor.Options{
 		StartURLs:             []string{u},
 		Timeout:               5 * time.Minute,
 		RobotsTxtDisabled:     true,
@@ -194,112 +203,47 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f filter.Filt
 		RequestDelay:          750 * time.Millisecond,
 		RequestDelayRandomize: true,
 		ParseFunc: func(g *geziyor.Geziyor, r *client.Response) {
-			resp, err := httputil.DumpResponse(interface{}(r).(*http.Response), true)
-			if err == nil {
-				for _, n := range subRE.FindAllString(string(resp), -1) {
-					if name := CleanName(n); whichDomain(name, scope) != "" {
+			process := func(n string) {
+				if u, err := r.Request.URL.Parse(n); err == nil {
+					host := u.Hostname()
+					if host != "" {
+						results.Insert(host)
+					}
+					if whichDomain(host, scope) == "" {
+						return
+					}
+
+					if s := u.String(); s != "" && !filter.Has(s) {
+						// Be sure the crawl has not exceeded the maximum links to be followed
 						m.Lock()
-						results.Insert(name)
+						count++
+						if max <= 0 || count < max {
+							filter.Insert(s)
+							g.Get(s, g.Opt.ParseFunc)
+						}
 						m.Unlock()
 					}
 				}
 			}
-
-			processURL := func(u *url.URL) {
-				// Attempt to save the name in our results
-				m.Lock()
-				results.Insert(u.Hostname())
-				m.Unlock()
-
-				if s := crawlFilterURLs(u, f); s != "" {
-					// Be sure the crawl has not exceeded the maximum links to be followed
-					m.Lock()
-					count++
-					current := count
-					m.Unlock()
-					if max <= 0 || current < max {
-						g.Get(s, g.Opt.ParseFunc)
+			tag := func(i int, s *goquery.Selection) {
+				// TODO: add the 'srcset' attr
+				attrs := []string{"action", "cite", "data", "formaction",
+					"href", "longdesc", "poster", "src", "srcset", "xmlns"}
+				for _, attr := range attrs {
+					if name, ok := s.Attr(attr); ok {
+						process(name)
 					}
 				}
 			}
 
-			r.HTMLDoc.Find("a").Each(func(i int, s *goquery.Selection) {
-				if href, ok := s.Attr("href"); ok {
-					if u, err := r.JoinURL(href); err == nil && whichDomain(u.Hostname(), newScope) != "" {
-						processURL(u)
-					}
-				}
-			})
-
-			r.HTMLDoc.Find("script").Each(func(i int, s *goquery.Selection) {
-				if src, ok := s.Attr("src"); ok {
-					if u, err := r.JoinURL(src); err == nil && whichDomain(u.Hostname(), newScope) != "" {
-						processURL(u)
-					}
-				}
-			})
+			tagname := []string{"a", "area", "audio", "base", "blockquote", "button",
+				"embed", "form", "frame", "frameset", "html", "iframe", "img", "input",
+				"ins", "link", "noframes", "object", "q", "script", "source", "track", "video"}
+			for _, t := range tagname {
+				r.HTMLDoc.Find(t).Each(tag)
+			}
 		},
 	})
-	options := &client.Options{
-		MaxBodySize:    100 * 1024 * 1024, // 100MB
-		RetryTimes:     2,
-		RetryHTTPCodes: []int{408, 500, 502, 503, 504, 522, 524},
-	}
-	g.Client = client.NewClient(options)
-	g.Client.Client = http.DefaultClient
-
-	done := make(chan struct{}, 2)
-	go func() {
-		g.Start()
-		done <- struct{}{}
-	}()
-
-	var err error
-	select {
-	case <-ctx.Done():
-		err = fmt.Errorf("The context expired during the crawl of %s", u)
-	case <-done:
-		if len(results.Slice()) == 0 {
-			err = fmt.Errorf("No DNS names were discovered during the crawl of %s", u)
-		}
-	}
-
-	return results.Slice(), err
-}
-
-func crawlFilterURLs(p *url.URL, f filter.Filter) string {
-	// Check that the URL has an appropriate scheme for scraping
-	if !p.IsAbs() || (p.Scheme != "http" && p.Scheme != "https") {
-		return ""
-	}
-	// If the URL path has a file extension, check that it's of interest
-	if ext := crawlRE.FindString(p.Path); ext != "" {
-		ext = strings.ToLower(ext)
-
-		var found bool
-		for _, s := range crawlFileStarts {
-			if strings.HasPrefix(ext, "." + s) {
-				found = true
-				break
-			}
-		}
-		for _, e := range crawlFileEnds {
-			if strings.HasSuffix(ext, e) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return ""
-		}
-	}
-	// Remove fragments and check if we've seen this URL before
-	p.Fragment = ""
-	p.RawFragment = ""
-	if f.Duplicate(p.String()) {
-		return ""
-	}
-	return p.String()
 }
 
 func whichDomain(name string, scope []string) string {
@@ -307,10 +251,9 @@ func whichDomain(name string, scope []string) string {
 
 	for _, d := range scope {
 		if strings.HasSuffix(n, d) {
-			// fork made me do it :>
 			nlen := len(n)
 			dlen := len(d)
-			// Check for exact match first to guard against out of bound index
+			// Check for exact match first to guard against out of bounds index
 			if nlen == dlen || n[nlen-dlen-1] == '.' {
 				return d
 			}
@@ -322,27 +265,21 @@ func whichDomain(name string, scope []string) string {
 // PullCertificateNames attempts to pull a cert from one or more ports on an IP.
 func PullCertificateNames(ctx context.Context, addr string, ports []int) []string {
 	var names []string
-
 	// Check hosts for certificates that contain subdomain names
 	for _, port := range ports {
+		if c, err := TLSConn(ctx, addr, port); err == nil {
+			// Get the correct certificate in the chain
+			certChain := c.ConnectionState().PeerCertificates
+			// Create the new requests from names found within the cert
+			names = append(names, namesFromCert(certChain[0])...)
+		}
+
 		select {
 		case <-ctx.Done():
 			return names
 		default:
 		}
-
-		c, err := TLSConn(ctx, addr, port)
-
-		if err != nil {
-			continue
-		}
-		// Get the correct certificate in the chain
-		certChain := c.ConnectionState().PeerCertificates
-		cert := certChain[0]
-		// Create the new requests from names found within the cert
-		names = append(names, namesFromCert(cert)...)
 	}
-
 	return names
 }
 
@@ -368,7 +305,7 @@ func TLSConn(ctx context.Context, host string, port int) (*tls.Conn, error) {
 	t := time.NewTimer(handshakeTimeout)
 	select {
 	case <-t.C:
-		err = errors.New("Handshake timeout")
+		err = errors.New("handshake timeout")
 	case e := <-errChan:
 		err = e
 	}
@@ -392,7 +329,6 @@ func namesFromCert(cert *x509.Certificate) []string {
 
 	subdomains := stringset.New()
 	defer subdomains.Close()
-
 	// Add the subject common name to the list of subdomain names
 	commonName := dns.RemoveAsteriskLabel(cn)
 	if commonName != "" {
@@ -408,45 +344,26 @@ func namesFromCert(cert *x509.Certificate) []string {
 	return subdomains.Slice()
 }
 
-// ClientCountryCode returns the country code for the public-facing IP address for the host of the process.
-func ClientCountryCode(ctx context.Context) string {
-	headers := map[string]string{"Content-Type": "application/json"}
-
-	page, err := RequestWebPage(ctx, "https://ipapi.co/json", nil, headers, nil)
-	if err != nil {
-		return ""
-	}
-
-	// Extract the country code from the REST API results
-	var ipinfo struct {
-		CountryCode string `json:"country"`
-	}
-
-	if err := json.Unmarshal([]byte(page), &ipinfo); err != nil {
-		return ""
-	}
-	return strings.ToLower(ipinfo.CountryCode)
-}
-
 // CleanName will clean up the names scraped from the web.
 func CleanName(name string) string {
-	var err error
-
-	name, err = strconv.Unquote("\"" + strings.TrimSpace(name) + "\"")
-	if err == nil {
-		name = subRE.FindString(name)
+	clean, err := strconv.Unquote("\"" + strings.TrimSpace(name) + "\"")
+	if err != nil {
+		return name
 	}
 
-	name = strings.ToLower(name)
-	for {
-		name = strings.Trim(name, "-.")
+	if re := subRE.FindString(clean); re != "" {
+		clean = re
+	}
 
-		if i := nameStripRE.FindStringIndex(name); i != nil {
-			name = name[i[1]:]
-		} else {
+	clean = strings.ToLower(clean)
+	for {
+		clean = strings.Trim(clean, "-.")
+
+		i := nameStripRE.FindStringIndex(clean)
+		if i == nil {
 			break
 		}
+		clean = clean[i[1]:]
 	}
-
-	return name
+	return clean
 }

@@ -8,13 +8,9 @@ probes = {"www", "online", "webserver", "ns", "ns1", "mail", "smtp", "webmail", 
             "prod", "test", "vpn", "ftp", "ssh", "secure", "whm", "admin", "webdisk", "mobile",
             "remote", "server", "cpanel", "cloud", "autodiscover", "api", "m", "blog"}
 
-function start()
-    set_rate_limit(1)
-end
-
 function vertical(ctx, domain)
     local cfg = config(ctx)
-    if cfg.mode == "passive" then
+    if (cfg.mode == "passive") then
         return
     end
 
@@ -24,10 +20,15 @@ function vertical(ctx, domain)
 end
 
 function resolved(ctx, name, domain, records)
+    local cfg = config(ctx)
+    if (cfg.mode == "passive") then
+        return
+    end
+
     local nparts = split(name, ".")
     local dparts = split(domain, ".")
     -- Do not process resolved root domain names
-    if #nparts == #dparts then
+    if (#nparts == #dparts) then
         return
     end
 
@@ -36,26 +37,33 @@ function resolved(ctx, name, domain, records)
         return
     end
 
-    local cfg = config(ctx)
-    if cfg.mode == "passive" then
-        return
-    end
-
     local bf = cfg['brute_forcing']
-    if (bf.active and bf.recursive and (bf['min_for_recursive'] == 0)) then
-        make_names(ctx, name)
+    if (bf.active and bf.recursive) then
+        if (bf['max_depth'] > 0 and #nparts > bf['max_depth'] + #dparts) then
+            return
+        end
+        if (bf['min_for_recursive'] == 0) then
+            make_names(ctx, name)
+        end
     end
 end
 
 function subdomain(ctx, name, domain, times)
     local cfg = config(ctx)
-    if cfg.mode == "passive" then
+    if (cfg.mode == "passive") then
         return
     end
 
     local bf = cfg['brute_forcing']
-    if (bf.active and bf.recursive and (bf['min_for_recursive'] == times)) then
-        make_names(ctx, name)
+    local nparts = split(name, ".")
+    local dparts = split(domain, ".")
+    if (bf.active and bf.recursive) then
+        if (bf['max_depth'] > 0 and #nparts > bf['max_depth'] + #dparts) then
+            return
+        end
+        if (bf['min_for_recursive'] == times) then
+            make_names(ctx, name)
+        end
     end
 end
 
@@ -64,15 +72,11 @@ function make_names(ctx, base)
 
     for i, word in pairs(wordlist) do
         new_name(ctx, word .. "." .. base)
-
-        if i % 1000 == 0 then
-            check_rate_limit()
-        end
     end
 end
 
 function has_cname(records)
-    if #records == 0 then
+    if (#records == 0) then
         return false
     end
 
@@ -86,7 +90,7 @@ function has_cname(records)
 end
 
 function has_addr(records)
-    if #records == 0 then
+    if (#records == 0) then
         return false
     end
 

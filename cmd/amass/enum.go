@@ -27,7 +27,6 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/enum"
-	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/OWASP/Amass/v3/systems"
@@ -51,6 +50,7 @@ type enumArgs struct {
 	Included          *stringset.Set
 	Interface         string
 	MaxDNSQueries     int
+	MaxDepth          int
 	MinForRecursive   int
 	Names             *stringset.Set
 	Ports             format.ParseInts
@@ -105,6 +105,7 @@ func defineEnumArgumentFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.Var(args.Included, "include", "Data source names separated by commas to be included")
 	enumFlags.StringVar(&args.Interface, "iface", "", "Provide the network interface to send traffic through")
 	enumFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of DNS queries per second")
+	enumFlags.IntVar(&args.MaxDepth, "max-depth", 0, "Maximum number of subdomain labels for brute forcing")
 	enumFlags.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing (Default: 1)")
 	enumFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
 	enumFlags.Var(args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
@@ -196,11 +197,14 @@ func runEnumCommand(clArgs []string) {
 	// This channel sends the signal for goroutines to terminate
 	done := make(chan struct{})
 
-	wg.Add(1)
-	// This goroutine will handle printing the output
-	printOutChan := make(chan *requests.Output, 10)
-	go printOutput(e, args, printOutChan, &wg)
-	outChans = append(outChans, printOutChan)
+	// Print output only if JSONOutput is not meant for STDOUT
+	if args.Filepaths.JSONOutput != "-" {
+		wg.Add(1)
+		// This goroutine will handle printing the output
+		printOutChan := make(chan *requests.Output, 10)
+		go printOutput(e, args, printOutChan, &wg)
+		outChans = append(outChans, printOutChan)
+	}
 
 	wg.Add(1)
 	// This goroutine will handle saving the output to the text file
@@ -227,17 +231,18 @@ func runEnumCommand(clArgs []string) {
 	go processOutput(ctx, e, outChans, done, &wg)
 
 	// Monitor for cancellation by the user
-	go func() {
+	go func(c context.CancelFunc) {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(quit)
 
 		select {
 		case <-quit:
-			cancel()
+			c()
 		case <-done:
 		case <-ctx.Done():
 		}
-	}()
+	}(cancel)
 
 	// Start the enumeration process
 	if err := e.Start(ctx); err != nil {
@@ -249,18 +254,28 @@ func runEnumCommand(clArgs []string) {
 	wg.Wait()
 
 	// If necessary, handle graph database migration
-	if !cfg.Passive && len(e.Sys.GraphDatabases()) > 0 {
+	if len(e.Sys.GraphDatabases()) > 0 {
 		fmt.Fprintf(color.Error, "\n%s\n", green("The enumeration has finished"))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		// Monitor for cancellation by the user
+		go func(c context.CancelFunc) {
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(quit)
+
+			<-quit
+			c()
+		}(cancel)
 
 		// Copy the graph of findings into the system graph databases
 		for _, g := range e.Sys.GraphDatabases() {
 			fmt.Fprintf(color.Error, "%s%s%s\n",
 				yellow("Discoveries are being migrated into the "), yellow(g.String()), yellow(" database"))
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-
-			if err := e.Graph.MigrateEvents(ctx, g, e.Config.UUID.String()); err != nil {
+			if err := e.Graph.Migrate(ctx, g); err != nil {
 				fmt.Fprintf(color.Error, "%s%s%s%s\n",
 					red("The database migration to "), red(g.String()), red(" failed: "), red(err.Error()))
 			}
@@ -477,11 +492,20 @@ func saveJSONOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 		return
 	}
 
-	jsonptr, err := os.OpenFile(jsonfile, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		r.Fprintf(color.Error, "Failed to open the JSON output file: %v\n", err)
-		os.Exit(1)
+	var jsonptr *os.File
+	var err error
+
+	// Write to STDOUT and not a file if named "-"
+	if args.Filepaths.JSONOutput == "-" {
+		jsonptr = os.Stdout
+	} else {
+		jsonptr, err = os.OpenFile(jsonfile, os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			r.Fprintf(color.Error, "Failed to open the JSON output file: %v\n", err)
+			os.Exit(1)
+		}
 	}
+
 	defer func() {
 		_ = jsonptr.Sync()
 		_ = jsonptr.Close()
@@ -508,24 +532,22 @@ func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *req
 	}()
 
 	// This filter ensures that we only get new names
-	known := filter.NewBloomFilter(1 << 22)
+	known := stringset.New()
+	defer known.Close()
 	// The function that obtains output from the enum and puts it on the channel
 	extract := func(limit int) {
 		for _, o := range ExtractOutput(ctx, e, known, true, limit) {
-			if !e.Config.IsDomainInScope(o.Name) {
+			if !o.Complete(e.Config.Passive) || !e.Config.IsDomainInScope(o.Name) {
 				continue
 			}
 
 			for _, ch := range outputs {
-				if !o.Complete(e.Config.Passive) {
-					e.Config.Log.Printf("Incomplete output: %v", o)
-				}
 				ch <- o
 			}
 		}
 	}
 
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -714,6 +736,9 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if e.MinForRecursive != 1 {
 		conf.MinForRecursive = e.MinForRecursive
+	}
+	if e.MaxDepth != 0 {
+		conf.MaxDepth = e.MaxDepth
 	}
 	if e.Options.Active {
 		conf.Active = true

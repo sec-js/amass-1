@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/OWASP/Amass/v3/enum"
-	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/caffix/netmap"
 	"github.com/caffix/service"
+	"github.com/caffix/stringset"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -24,7 +24,7 @@ func init() {
 }
 
 // ExtractOutput is a convenience method for obtaining new discoveries made by the enumeration process.
-func ExtractOutput(ctx context.Context, e *enum.Enumeration, filter filter.Filter, asinfo bool, limit int) []*requests.Output {
+func ExtractOutput(ctx context.Context, e *enum.Enumeration, filter *stringset.Set, asinfo bool, limit int) []*requests.Output {
 	if e.Config.Passive {
 		return EventNames(ctx, e.Graph, e.Config.UUID.String(), filter)
 	}
@@ -35,11 +35,11 @@ func ExtractOutput(ctx context.Context, e *enum.Enumeration, filter filter.Filte
 type outLookup map[string]*requests.Output
 
 // EventOutput returns findings within the receiver Graph for the event identified by the uuid string
-// parameter and not already in the filter StringFilter argument. The filter is updated by EventOutput.
-func EventOutput(ctx context.Context, g *netmap.Graph, uuid string, f filter.Filter, asninfo bool, cache *requests.ASNCache, limit int) []*requests.Output {
+// parameter and not already in the filter argument. The filter is updated by EventOutput.
+func EventOutput(ctx context.Context, g *netmap.Graph, uuid string, f *stringset.Set, asninfo bool, cache *requests.ASNCache, limit int) []*requests.Output {
 	// Make sure a filter has been created
 	if f == nil {
-		f = filter.NewStringFilter()
+		f = stringset.New()
 		defer f.Close()
 	}
 
@@ -55,18 +55,15 @@ func EventOutput(ctx context.Context, g *netmap.Graph, uuid string, f filter.Fil
 	for _, o := range buildNameInfo(ctx, g, uuid, names) {
 		lookup[o.Name] = o
 	}
-
-	pairs, err := g.NamesToAddrs(ctx, uuid, names...)
-	if err != nil {
-		return nil
-	}
 	// Build the lookup map used to create the final result set
-	for _, p := range pairs {
-		if p.Name == "" || p.Addr == "" {
-			continue
-		}
-		if o, found := lookup[p.Name]; found {
-			o.Addresses = append(o.Addresses, requests.AddressInfo{Address: net.ParseIP(p.Addr)})
+	if pairs, err := g.NamesToAddrs(ctx, uuid, names...); err == nil {
+		for _, p := range pairs {
+			if p.Name == "" || p.Addr == "" {
+				continue
+			}
+			if o, found := lookup[p.Name]; found {
+				o.Addresses = append(o.Addresses, requests.AddressInfo{Address: net.ParseIP(p.Addr)})
+			}
 		}
 	}
 
@@ -91,11 +88,12 @@ func randomSelection(names []string, limit int) []string {
 	return sel
 }
 
-func removeDuplicates(lookup outLookup, filter filter.Filter) []*requests.Output {
+func removeDuplicates(lookup outLookup, filter *stringset.Set) []*requests.Output {
 	output := make([]*requests.Output, 0, len(lookup))
 
 	for _, o := range lookup {
-		if !filter.Duplicate(o.Name) {
+		if !filter.Has(o.Name) {
+			filter.Insert(o.Name)
 			output = append(output, o)
 		}
 	}
@@ -103,7 +101,7 @@ func removeDuplicates(lookup outLookup, filter filter.Filter) []*requests.Output
 	return output
 }
 
-func addInfrastructureInfo(lookup outLookup, filter filter.Filter, cache *requests.ASNCache) []*requests.Output {
+func addInfrastructureInfo(lookup outLookup, filter *stringset.Set, cache *requests.ASNCache) []*requests.Output {
 	output := make([]*requests.Output, 0, len(lookup))
 
 	for _, o := range lookup {
@@ -126,7 +124,8 @@ func addInfrastructureInfo(lookup outLookup, filter filter.Filter, cache *reques
 		}
 
 		o.Addresses = newaddrs
-		if len(o.Addresses) > 0 && !filter.Duplicate(o.Name) {
+		if len(o.Addresses) > 0 && !filter.Has(o.Name) {
+			filter.Insert(o.Name)
 			output = append(output, o)
 		}
 	}
@@ -135,11 +134,11 @@ func addInfrastructureInfo(lookup outLookup, filter filter.Filter, cache *reques
 }
 
 // EventNames returns findings within the receiver Graph for the event identified by the uuid string
-// parameter and not already in the filter StringFilter argument. The filter is updated by EventNames.
-func EventNames(ctx context.Context, g *netmap.Graph, uuid string, f filter.Filter) []*requests.Output {
+// parameter and not already in the filter argument. The filter is updated by EventNames.
+func EventNames(ctx context.Context, g *netmap.Graph, uuid string, f *stringset.Set) []*requests.Output {
 	// Make sure a filter has been created
 	if f == nil {
-		f = filter.NewStringFilter()
+		f = stringset.New()
 		defer f.Close()
 	}
 
@@ -152,7 +151,8 @@ func EventNames(ctx context.Context, g *netmap.Graph, uuid string, f filter.Filt
 
 	var results []*requests.Output
 	for _, o := range buildNameInfo(ctx, g, uuid, names) {
-		if !f.Duplicate(o.Name) {
+		if !f.Has(o.Name) {
+			f.Insert(o.Name)
 			results = append(results, o)
 		}
 	}

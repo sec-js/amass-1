@@ -39,9 +39,11 @@ import (
 	"github.com/OWASP/Amass/v3/format"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
+	"github.com/OWASP/Amass/v3/resources"
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/netmap"
 	"github.com/caffix/service"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -127,6 +129,8 @@ func main() {
 		runTrackCommand(os.Args[2:])
 	case "viz":
 		runVizCommand(os.Args[2:])
+	case "help":
+		runHelpCommand(os.Args[2:])
 	default:
 		commandUsage(mainUsageMsg, mainFlagSet, defaultBuf)
 		os.Exit(1)
@@ -328,10 +332,11 @@ func memGraphForScope(ctx context.Context, domains []string, from *netmap.Graph)
 }
 
 func getEventOutput(ctx context.Context, uuids []string, asninfo bool, db *netmap.Graph, cache *requests.ASNCache) []*requests.Output {
+	filter := stringset.New()
 	var output []*requests.Output
 
 	for i := len(uuids) - 1; i >= 0; i-- {
-		output = append(output, EventOutput(ctx, db, uuids[i], nil, asninfo, cache, 0)...)
+		output = append(output, EventOutput(ctx, db, uuids[i], filter, asninfo, cache, 0)...)
 	}
 
 	return output
@@ -381,7 +386,7 @@ func assignNetInterface(iface *net.Interface) error {
 }
 
 func cacheWithData() *requests.ASNCache {
-	ranges, err := config.GetIP2ASNData()
+	ranges, err := resources.GetIP2ASNData()
 	if err != nil {
 		return nil
 	}
@@ -396,6 +401,5 @@ func cacheWithData() *requests.ASNCache {
 			Description: r.Description,
 		})
 	}
-
 	return cache
 }

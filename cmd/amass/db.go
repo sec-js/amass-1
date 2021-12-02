@@ -247,10 +247,10 @@ func showEventData(args *dbArgs, uuids []string, asninfo bool, db *netmap.Graph)
 		if l := len(out.Addresses); (args.Options.IPs || args.Options.IPv4 || args.Options.IPv6) && l == 0 {
 			continue
 		} else if l > 0 {
-			total++
 			format.UpdateSummaryData(out, tags, asns)
 		}
 
+		total++
 		source, name, ips := format.OutputLineParts(out, args.Options.Sources,
 			args.Options.IPs || args.Options.IPv4 || args.Options.IPv6, args.Options.DemoMode)
 		if ips != "" {
@@ -348,11 +348,20 @@ func writeJSON(args *dbArgs, uuids []string, assets []*requests.Output, db *netm
 		d.Names = append(d.Names, asset)
 	}
 
-	jsonptr, err := os.OpenFile(args.Filepaths.JSONOutput, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		r.Fprintf(color.Error, "Failed to open the JSON output file: %v\n", err)
-		return
+	var jsonptr *os.File
+	var err error
+
+	// Write to STDOUT and not a file if named "-"
+	if args.Filepaths.JSONOutput == "-" {
+		jsonptr = os.Stdout
+	} else {
+		jsonptr, err = os.OpenFile(args.Filepaths.JSONOutput, os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			r.Fprintf(color.Error, "Failed to open the JSON output file: %v\n", err)
+			return
+		}
 	}
+
 	// Remove previously stored data and encode the JSON
 	_ = jsonptr.Truncate(0)
 	_, _ = jsonptr.Seek(0, 0)
@@ -397,6 +406,5 @@ func fillCache(cache *requests.ASNCache, db *netmap.Graph) error {
 			})
 		}
 	}
-
 	return nil
 }
