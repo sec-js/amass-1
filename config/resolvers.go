@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package config
 
@@ -32,92 +33,29 @@ var DefaultBaselineResolvers = []string{
 	"9.9.9.9",        // Quad9
 	"208.67.222.222", // Cisco OpenDNS
 	"84.200.69.80",   // DNS.WATCH
-	"64.6.64.6",      // Verisign
-	"8.26.56.26",     // Comodo Secure DNS
 	"64.6.64.6",      // Neustar DNS
-	"195.46.39.39",   // SafeDNS
+	"8.26.56.26",     // Comodo Secure DNS
+	"205.171.3.65",   // Level3
+	"134.195.4.2",    // OpenNIC
 	"185.228.168.9",  // CleanBrowsing
 	"76.76.19.19",    // Alternate DNS
+	"37.235.1.177",   // FreeDNS
 	"77.88.8.1",      // Yandex.DNS
 	"94.140.14.140",  // AdGuard
-	"216.146.35.35",  // Dyn
-	"192.71.245.208", // OpenNIC
 	"38.132.106.139", // CyberGhost
-	"109.69.8.51",    // puntCAT
 	"74.82.42.42",    // Hurricane Electric
+	"76.76.2.0",      // ControlD
 }
 
 // PublicResolvers includes the addresses of public resolvers obtained dynamically.
 var PublicResolvers []string
 
-func init() {
-	addrs, err := getPublicDNSResolvers()
-	if err != nil {
-		return
-	}
-loop:
-	for _, addr := range addrs {
-		for _, br := range DefaultBaselineResolvers {
-			if addr == br {
-				continue loop
-			}
-		}
-		PublicResolvers = append(PublicResolvers, addr)
-	}
-}
-
-// SetResolvers assigns the resolver names provided in the parameter to the list in the configuration.
-func (c *Config) SetResolvers(resolvers ...string) {
-	c.Resolvers = []string{}
-
-	c.AddResolvers(resolvers...)
-}
-
-// AddResolvers appends the resolver names provided in the parameter to the list in the configuration.
-func (c *Config) AddResolvers(resolvers ...string) {
-	for _, r := range resolvers {
-		c.AddResolver(r)
-	}
-}
-
-// AddResolver appends the resolver name provided in the parameter to the list in the configuration.
-func (c *Config) AddResolver(resolver string) {
-	c.Lock()
-	defer c.Unlock()
-
-	// Check that the domain string is not empty
-	r := strings.TrimSpace(resolver)
-	if r == "" {
-		return
-	}
-
-	c.Resolvers = stringset.Deduplicate(append(c.Resolvers, resolver))
-	c.calcDNSQueriesMax()
-}
-
-func (c *Config) loadResolverSettings(cfg *ini.File) error {
-	sec, err := cfg.GetSection("resolvers")
-	if err != nil {
-		return nil
-	}
-
-	c.Resolvers = stringset.Deduplicate(sec.Key("resolver").ValueWithShadows())
-	if len(c.Resolvers) == 0 {
-		return errors.New("no resolver keys were found in the resolvers section")
-	}
-
-	return nil
-}
-
-func (c *Config) calcDNSQueriesMax() {
-	c.MaxDNSQueries = len(c.Resolvers) * DefaultQueriesPerPublicResolver
-}
-
-func getPublicDNSResolvers() ([]string, error) {
+// GetPublicDNSResolvers obtains the public DNS server addresses from public-dns.info and assigns them to PublicResolvers.
+func GetPublicDNSResolvers() error {
 	url := "https://public-dns.info/nameservers-all.csv"
 	page, err := http.RequestWebPage(context.Background(), url, nil, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to obtain the Public DNS csv file at %s: %v", url, err)
+		return fmt.Errorf("failed to obtain the Public DNS csv file at %s: %v", url, err)
 	}
 
 	var resolvers []string
@@ -141,11 +79,93 @@ func getPublicDNSResolvers() ([]string, error) {
 			}
 			continue
 		}
-
 		if rel, err := strconv.ParseFloat(record[reliabilityIdx], 64); err == nil && rel >= minResolverReliability {
 			resolvers = append(resolvers, record[ipIdx])
 		}
 	}
+loop:
+	for _, addr := range resolvers {
+		for _, br := range DefaultBaselineResolvers {
+			if addr == br {
+				continue loop
+			}
+		}
+		PublicResolvers = append(PublicResolvers, addr)
+	}
+	return nil
+}
 
-	return resolvers, nil
+// SetResolvers assigns the untrusted resolver names provided in the parameter to the list in the configuration.
+func (c *Config) SetResolvers(resolvers ...string) {
+	c.Resolvers = []string{}
+	c.AddResolvers(resolvers...)
+}
+
+// AddResolvers appends the untrusted resolver names provided in the parameter to the list in the configuration.
+func (c *Config) AddResolvers(resolvers ...string) {
+	for _, r := range resolvers {
+		c.AddResolver(r)
+	}
+	c.CalcMaxQPS()
+}
+
+// AddResolver appends the untrusted resolver name provided in the parameter to the list in the configuration.
+func (c *Config) AddResolver(resolver string) {
+	c.Lock()
+	defer c.Unlock()
+
+	// Check that the domain string is not empty
+	r := strings.TrimSpace(resolver)
+	if r == "" {
+		return
+	}
+
+	c.Resolvers = stringset.Deduplicate(append(c.Resolvers, resolver))
+}
+
+// SetTrustedResolvers assigns the trusted resolver names provided in the parameter to the list in the configuration.
+func (c *Config) SetTrustedResolvers(resolvers ...string) {
+	c.Resolvers = []string{}
+	c.AddResolvers(resolvers...)
+}
+
+// AddTrustedResolvers appends the trusted resolver names provided in the parameter to the list in the configuration.
+func (c *Config) AddTrustedResolvers(resolvers ...string) {
+	for _, r := range resolvers {
+		c.AddTrustedResolver(r)
+	}
+	c.CalcMaxQPS()
+}
+
+// AddTrustedResolver appends the trusted resolver name provided in the parameter to the list in the configuration.
+func (c *Config) AddTrustedResolver(resolver string) {
+	c.Lock()
+	defer c.Unlock()
+
+	// Check that the domain string is not empty
+	r := strings.TrimSpace(resolver)
+	if r == "" {
+		return
+	}
+
+	c.TrustedResolvers = stringset.Deduplicate(append(c.TrustedResolvers, resolver))
+}
+
+// CalcMaxQPS updates the MaxDNSQueries field of the configuration based on current settings.
+func (c *Config) CalcMaxQPS() {
+	c.MaxDNSQueries = (len(c.Resolvers) * c.ResolversQPS) + (len(c.TrustedResolvers) * c.TrustedQPS)
+}
+
+func (c *Config) loadResolverSettings(cfg *ini.File) error {
+	sec, err := cfg.GetSection("resolvers")
+	if err != nil {
+		return nil
+	}
+
+	c.Resolvers = stringset.Deduplicate(sec.Key("resolver").ValueWithShadows())
+	if len(c.Resolvers) == 0 {
+		return errors.New("no resolver keys were found in the resolvers section")
+	}
+
+	return nil
 }

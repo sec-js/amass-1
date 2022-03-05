@@ -27,7 +27,7 @@ amass enum -d example.com
 Typical parameters for DNS enumeration:
 
 ```bash
-$ amass enum -v -src -ip -brute -min-for-recursive 2 -share -d example.com
+$ amass enum -v -src -ip -brute -min-for-recursive 2 -d example.com
 [Google] www.example.com
 [VirusTotal] ns.example.com
 ...
@@ -115,20 +115,23 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -json | Path to the JSON output file | amass enum -json out.json -d example.com |
 | -list | Print the names of all available data sources | amass enum -list |
 | -log | Path to the log file where errors will be written | amass enum -log amass.log -d example.com |
-| -max-dns-queries | Maximum number of concurrent DNS queries | amass enum -max-dns-queries 200 -d example.com |
+| -max-dns-queries | Deprecated flag to be replaced by dns-qps in version 4.0 | amass enum -max-dns-queries 200 -d example.com |
+| -dns-qps | Maximum number of DNS queries per second across all resolvers | amass enum -dns-qps 200 -d example.com |
+| -rqps | Maximum number of DNS queries per second for each untrusted resolver | amass enum -rqps 10 -d example.com |
+| -trqps | Maximum number of DNS queries per second for each trusted resolver | amass enum -trqps 20 -d example.com |
 | -min-for-recursive | Subdomain labels seen before recursive brute forcing (Default: 1) | amass enum -brute -min-for-recursive 3 -d example.com |
 | -max-depth | Maximum number of subdomain labels for brute forcing | amass enum -brute -max-depth 3 -d example.com |
 | -nf | Path to a file providing already known subdomain names (from other tools/sources) | amass enum -nf names.txt -d example.com |
 | -noalts | Disable generation of altered names | amass enum -noalts -d example.com |
-| -nolocaldb | Disable saving data into a local database | amass enum -nolocaldb -d example.com |
 | -norecursive | Turn off recursive brute forcing | amass enum -brute -norecursive -d example.com |
 | -o | Path to the text output file | amass enum -o out.txt -d example.com |
 | -oA | Path prefix used for naming all output files | amass enum -oA amass_scan -d example.com |
 | -passive | A purely passive mode of execution | amass enum --passive -d example.com |
 | -p | Ports separated by commas (default: 443) | amass enum -d example.com -p 443,8080 |
-| -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass enum -r 8.8.8.8,1.1.1.1 -d example.com |
-| -rf | Path to a file providing preferred DNS resolvers | amass enum -rf data/resolvers.txt -d example.com |
-| -share | Share findings with data source providers | amass enum -share -config config.ini -d example.com |
+| -r | IP addresses of untrusted DNS resolvers (can be used multiple times) | amass enum -r 8.8.8.8,1.1.1.1 -d example.com |
+| -tr | IP addresses of trusted DNS resolvers (can be used multiple times) | amass enum -tr 8.8.8.8,1.1.1.1 -d example.com |
+| -rf | Path to a file providing untrusted DNS resolvers | amass enum -rf data/resolvers.txt -d example.com |
+| -trf | Path to a file providing trusted DNS resolvers | amass enum -trf data/trusted.txt -d example.com |
 | -src | Print data sources for the discovered names | amass enum -src -d example.com |
 | -timeout | Number of minutes to execute the enumeration | amass enum -timeout 30 -d example.com |
 | -w | Path to a different wordlist file | amass enum -brute -w wordlist.txt -d example.com |
@@ -153,7 +156,6 @@ Switches for outputting the DNS and infrastructure findings as a network graph:
 | -graphistry | Output Graphistry JSON | amass viz -graphistry -d example.com |
 | -i | Path to the Amass data operations JSON input file | amass viz -d3 -d example.com |
 | -maltego | Output a Maltego Graph Table CSV file | amass viz -maltego -d example.com |
-| -visjs | Output HTML that employs VisJS | amass viz -visjs -d example.com |
 
 ### The 'track' Subcommand
 
@@ -185,7 +187,7 @@ Performs viewing and manipulation of the graph database. This subcommand only le
 | -ip | Show the IP addresses for discovered names | amass db -show -ip -d example.com |
 | -ipv4 | Show the IPv4 addresses for discovered names | amass db -show -ipv4 -d example.com |
 | -ipv6 | Show the IPv6 addresses for discovered names | amass db -show -ipv6 -d example.com |
-| -json | Path to the JSON output file | amass db -names -silent -json out.json -d example.com |
+| -json | Path to the JSON output file or '-' | amass db -names -silent -json out.json -d example.com |
 | -list | Print enumerations in the database and filter on domains specified | amass db -list |
 | -names | Print just discovered names | amass db -names -d example.com |
 | -nocolor | Disable colorized output | amass db -names -nocolor -d example.com |
@@ -228,7 +230,6 @@ Note that these locations are based on the [output directory](#the-output-direct
 | mode | Determines which mode the enumeration is performed in: default, passive or active |
 | output_directory | The directory that stores the graph database and other output files |
 | maximum_dns_queries | The maximum number of concurrent DNS queries that can be performed |
-| include_unresolvable | When set to true, causes DNS names that did not resolve to be printed |
 
 ### The network_settings Section
 

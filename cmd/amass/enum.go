@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
@@ -32,6 +33,7 @@ import (
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/stringset"
 	"github.com/fatih/color"
+	bf "github.com/tylertreat/BoomFilters"
 )
 
 const enumUsageMsg = "enum [options] -d DOMAIN"
@@ -50,11 +52,14 @@ type enumArgs struct {
 	Included          *stringset.Set
 	Interface         string
 	MaxDNSQueries     int
+	ResolverQPS       int
+	TrustedQPS        int
 	MaxDepth          int
 	MinForRecursive   int
 	Names             *stringset.Set
 	Ports             format.ParseInts
 	Resolvers         *stringset.Set
+	Trusted           *stringset.Set
 	Timeout           int
 	Options           struct {
 		Active          bool
@@ -69,7 +74,6 @@ type enumArgs struct {
 		NoLocalDatabase bool
 		NoRecursive     bool
 		Passive         bool
-		Share           bool
 		Silent          bool
 		Sources         bool
 		Verbose         bool
@@ -88,6 +92,7 @@ type enumArgs struct {
 		LogFile          string
 		Names            format.ParseStrings
 		Resolvers        format.ParseStrings
+		Trusted          format.ParseStrings
 		ScriptsDirectory string
 		TermOut          string
 	}
@@ -104,15 +109,20 @@ func defineEnumArgumentFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.Var(args.Excluded, "exclude", "Data source names separated by commas to be excluded")
 	enumFlags.Var(args.Included, "include", "Data source names separated by commas to be included")
 	enumFlags.StringVar(&args.Interface, "iface", "", "Provide the network interface to send traffic through")
-	enumFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of DNS queries per second")
+	enumFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Deprecated flag to be replaced by dns-qps in version 4.0")
+	enumFlags.IntVar(&args.MaxDNSQueries, "dns-qps", 0, "Maximum number of DNS queries per second across all resolvers")
+	enumFlags.IntVar(&args.ResolverQPS, "rqps", 0, "Maximum number of DNS queries per second for each untrusted resolver")
+	enumFlags.IntVar(&args.TrustedQPS, "trqps", 0, "Maximum number of DNS queries per second for each trusted resolver")
 	enumFlags.IntVar(&args.MaxDepth, "max-depth", 0, "Maximum number of subdomain labels for brute forcing")
 	enumFlags.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing (Default: 1)")
 	enumFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
-	enumFlags.Var(args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
+	enumFlags.Var(args.Resolvers, "r", "IP addresses of untrusted DNS resolvers (can be used multiple times)")
+	enumFlags.Var(args.Resolvers, "tr", "IP addresses of trusted DNS resolvers (can be used multiple times)")
 	enumFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
 
 func defineEnumOptionFlags(enumFlags *flag.FlagSet, args *enumArgs) {
+	var placeholder bool
 	enumFlags.BoolVar(&args.Options.Active, "active", false, "Attempt zone transfers and certificate name grabs")
 	enumFlags.BoolVar(&args.Options.BruteForcing, "brute", false, "Execute brute forcing after searches")
 	enumFlags.BoolVar(&args.Options.DemoMode, "demo", false, "Censor output to make it suitable for demonstrations")
@@ -122,10 +132,10 @@ func defineEnumOptionFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")
 	enumFlags.BoolVar(&args.Options.NoAlts, "noalts", false, "Disable generation of altered names")
 	enumFlags.BoolVar(&args.Options.NoColor, "nocolor", false, "Disable colorized output")
-	enumFlags.BoolVar(&args.Options.NoLocalDatabase, "nolocaldb", false, "Disable saving data into a local database")
+	enumFlags.BoolVar(&placeholder, "nolocaldb", false, "Deprecated feature to be removed in version 4.0")
 	enumFlags.BoolVar(&args.Options.NoRecursive, "norecursive", false, "Turn off recursive brute forcing")
 	enumFlags.BoolVar(&args.Options.Passive, "passive", false, "Disable DNS resolution of names and dependent features")
-	enumFlags.BoolVar(&args.Options.Share, "share", false, "Share findings with data source providers")
+	enumFlags.BoolVar(&placeholder, "share", false, "Deprecated feature to be removed in version 4.0")
 	enumFlags.BoolVar(&args.Options.Silent, "silent", false, "Disable all output during execution")
 	enumFlags.BoolVar(&args.Options.Sources, "src", false, "Print data sources for the discovered names")
 	enumFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
@@ -144,7 +154,8 @@ func defineEnumFilepathFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.StringVar(&args.Filepaths.JSONOutput, "json", "", "Path to the JSON output file")
 	enumFlags.StringVar(&args.Filepaths.LogFile, "log", "", "Path to the log file where errors will be written")
 	enumFlags.Var(&args.Filepaths.Names, "nf", "Path to a file providing already known subdomain names (from other tools/sources)")
-	enumFlags.Var(&args.Filepaths.Resolvers, "rf", "Path to a file providing preferred DNS resolvers")
+	enumFlags.Var(&args.Filepaths.Resolvers, "rf", "Path to a file providing untrusted DNS resolvers")
+	enumFlags.Var(&args.Filepaths.Trusted, "trf", "Path to a file providing trusted DNS resolvers")
 	enumFlags.StringVar(&args.Filepaths.ScriptsDirectory, "scripts", "", "Path to a directory containing ADS scripts")
 	enumFlags.StringVar(&args.Filepaths.TermOut, "o", "", "Path to the text file containing terminal stdout/stderr")
 }
@@ -152,7 +163,6 @@ func defineEnumFilepathFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 func runEnumCommand(clArgs []string) {
 	// Seed the default pseudo-random number generator
 	rand.Seed(time.Now().UTC().UnixNano())
-
 	// Extract the correct config from the user provided arguments and/or configuration file
 	cfg, args := argsAndConfig(clArgs)
 	if cfg == nil {
@@ -167,10 +177,8 @@ func runEnumCommand(clArgs []string) {
 	if args.Filepaths.LogFile != "" {
 		logfile = args.Filepaths.LogFile
 	}
-
 	// Start handling the log messages
 	go writeLogsAndMessages(rLog, logfile, args.Options.Verbose)
-
 	// Create the System that will provide architecture to this enumeration
 	sys, err := systems.NewLocalSystem(cfg)
 	if err != nil {
@@ -178,12 +186,14 @@ func runEnumCommand(clArgs []string) {
 		os.Exit(1)
 	}
 	defer func() { _ = sys.Shutdown() }()
-	sys.SetDataSources(datasrcs.GetAllSources(sys))
 
+	if err := sys.SetDataSources(datasrcs.GetAllSources(sys)); err != nil {
+		r.Fprintf(color.Error, "%v\n", err)
+		os.Exit(1)
+	}
 	// Expand data source category names into the associated source names
 	initializeSourceTags(sys.DataSources())
 	cfg.SourceFilter.Sources = expandCategoryNames(cfg.SourceFilter.Sources, generateCategoryMap(sys))
-
 	// Setup the new enumeration
 	e := enum.NewEnumeration(cfg, sys)
 	if e == nil {
@@ -196,7 +206,6 @@ func runEnumCommand(clArgs []string) {
 	var outChans []chan *requests.Output
 	// This channel sends the signal for goroutines to terminate
 	done := make(chan struct{})
-
 	// Print output only if JSONOutput is not meant for STDOUT
 	if args.Filepaths.JSONOutput != "-" {
 		wg.Add(1)
@@ -229,7 +238,6 @@ func runEnumCommand(clArgs []string) {
 
 	wg.Add(1)
 	go processOutput(ctx, e, outChans, done, &wg)
-
 	// Monitor for cancellation by the user
 	go func(c context.CancelFunc) {
 		quit := make(chan os.Signal, 1)
@@ -243,7 +251,6 @@ func runEnumCommand(clArgs []string) {
 		case <-ctx.Done():
 		}
 	}(cancel)
-
 	// Start the enumeration process
 	if err := e.Start(ctx); err != nil {
 		r.Println(err)
@@ -252,39 +259,6 @@ func runEnumCommand(clArgs []string) {
 	// Let all the output goroutines know that the enumeration has finished
 	close(done)
 	wg.Wait()
-
-	// If necessary, handle graph database migration
-	if len(e.Sys.GraphDatabases()) > 0 {
-		fmt.Fprintf(color.Error, "\n%s\n", green("The enumeration has finished"))
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-
-		// Monitor for cancellation by the user
-		go func(c context.CancelFunc) {
-			quit := make(chan os.Signal, 1)
-			signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-			defer signal.Stop(quit)
-
-			<-quit
-			c()
-		}(cancel)
-
-		// Copy the graph of findings into the system graph databases
-		for _, g := range e.Sys.GraphDatabases() {
-			fmt.Fprintf(color.Error, "%s%s%s\n",
-				yellow("Discoveries are being migrated into the "), yellow(g.String()), yellow(" database"))
-
-			if err := e.Graph.Migrate(ctx, g); err != nil {
-				fmt.Fprintf(color.Error, "%s%s%s%s\n",
-					red("The database migration to "), red(g.String()), red(" failed: "), red(err.Error()))
-			}
-		}
-	}
-
-	if cfg.Share {
-		shareFindings(e, cfg)
-	}
 }
 
 func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
@@ -299,6 +273,7 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 		Included:          stringset.New(),
 		Names:             stringset.New(),
 		Resolvers:         stringset.New(),
+		Trusted:           stringset.New(),
 	}
 	var help1, help2 bool
 	enumCommand := flag.NewFlagSet("enum", flag.ContinueOnError)
@@ -532,8 +507,8 @@ func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *req
 	}()
 
 	// This filter ensures that we only get new names
-	known := stringset.New()
-	defer known.Close()
+	known := bf.NewDefaultStableBloomFilter(1000000, 0.01)
+	defer func() { _ = known.Reset() }()
 	// The function that obtains output from the enum and puts it on the channel
 	extract := func(limit int) {
 		for _, o := range ExtractOutput(ctx, e, known, true, limit) {
@@ -547,14 +522,14 @@ func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *req
 		}
 	}
 
-	t := time.NewTicker(10 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			extract(0)
 			return
 		case <-done:
-			// Check one last time
 			extract(0)
 			return
 		case <-t.C:
@@ -692,9 +667,6 @@ func processEnumInputFiles(args *enumArgs) error {
 
 // Setup the amass enumeration settings
 func (e enumArgs) OverrideConfig(conf *config.Config) error {
-	if e.Options.Share {
-		conf.Share = true
-	}
 	if len(e.Addresses) > 0 {
 		conf.Addresses = e.Addresses
 	}
@@ -728,9 +700,6 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	if e.Options.NoAlts {
 		conf.Alterations = false
 	}
-	if e.Options.NoLocalDatabase {
-		conf.LocalDatabase = false
-	}
 	if e.Options.NoRecursive {
 		conf.Recursive = false
 	}
@@ -756,13 +725,21 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	if e.Options.Verbose {
 		conf.Verbose = true
 	}
+	if e.ResolverQPS > 0 {
+		conf.ResolversQPS = e.ResolverQPS
+	}
+	if e.TrustedQPS > 0 {
+		conf.TrustedQPS = e.TrustedQPS
+	}
 	if e.Resolvers.Len() > 0 {
 		conf.SetResolvers(e.Resolvers.Slice()...)
+	}
+	if e.Trusted.Len() > 0 {
+		conf.SetTrustedResolvers(e.Trusted.Slice()...)
 	}
 	if e.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = e.MaxDNSQueries
 	}
-
 	if e.Included.Len() > 0 {
 		conf.SourceFilter.Include = true
 		// Check if brute forcing and alterations should be added

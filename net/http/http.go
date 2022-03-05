@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package http
 
@@ -28,6 +29,7 @@ import (
 	"github.com/caffix/stringset"
 	"github.com/geziyor/geziyor"
 	"github.com/geziyor/geziyor/client"
+	bf "github.com/tylertreat/BoomFilters"
 )
 
 const (
@@ -46,7 +48,7 @@ var (
 	// UserAgent is the default user agent used by Amass during HTTP requests.
 	UserAgent   string
 	subRE       = dns.AnySubdomainRegex()
-	nameStripRE = regexp.MustCompile(`^u[0-9a-f]{4}|20|22|25|27|2b|2f|3d|3a|40`)
+	nameStripRE = regexp.MustCompile(`^(u[0-9a-f]{4}|20|22|25|27|2b|2f|3d|3a|40)`)
 )
 
 // DefaultClient is the same HTTP client used by the package methods.
@@ -147,7 +149,7 @@ func RequestWebPage(ctx context.Context, u string, body io.Reader, hvals map[str
 }
 
 // Crawl will spider the web page at the URL argument looking for DNS names within the scope provided.
-func Crawl(ctx context.Context, u string, scope []string, max int, f *stringset.Set) ([]string, error) {
+func Crawl(ctx context.Context, u string, scope []string, max int, f *bf.StableBloomFilter) ([]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("the context expired")
@@ -155,8 +157,8 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f *stringset.
 	}
 
 	if f == nil {
-		f = stringset.New()
-		defer f.Close()
+		f = bf.NewDefaultStableBloomFilter(10000, 0.01)
+		defer f.Reset()
 	}
 
 	results := stringset.New()
@@ -189,7 +191,7 @@ func Crawl(ctx context.Context, u string, scope []string, max int, f *stringset.
 	return results.Slice(), err
 }
 
-func createCrawler(u string, scope []string, max int, results, filter *stringset.Set) *geziyor.Geziyor {
+func createCrawler(u string, scope []string, max int, results *stringset.Set, filter *bf.StableBloomFilter) *geziyor.Geziyor {
 	var count int
 	var m sync.Mutex
 
@@ -213,37 +215,44 @@ func createCrawler(u string, scope []string, max int, results, filter *stringset
 						return
 					}
 
-					if s := u.String(); s != "" && !filter.Has(s) {
-						// Be sure the crawl has not exceeded the maximum links to be followed
-						m.Lock()
+					m.Lock()
+					defer m.Unlock()
+
+					if s := u.String(); s != "" && !filter.Test([]byte(s)) {
 						count++
+						// Be sure the crawl has not exceeded the maximum links to be followed
 						if max <= 0 || count < max {
-							filter.Insert(s)
+							filter.Add([]byte(s))
 							g.Get(s, g.Opt.ParseFunc)
 						}
-						m.Unlock()
 					}
 				}
 			}
 			tag := func(i int, s *goquery.Selection) {
-				// TODO: add the 'srcset' attr
-				attrs := []string{"action", "cite", "data", "formaction",
-					"href", "longdesc", "poster", "src", "srcset", "xmlns"}
-				for _, attr := range attrs {
+				for _, attr := range crawlAttrs() {
 					if name, ok := s.Attr(attr); ok {
 						process(name)
 					}
 				}
 			}
 
-			tagname := []string{"a", "area", "audio", "base", "blockquote", "button",
-				"embed", "form", "frame", "frameset", "html", "iframe", "img", "input",
-				"ins", "link", "noframes", "object", "q", "script", "source", "track", "video"}
-			for _, t := range tagname {
+			for _, t := range crawlTagNames() {
 				r.HTMLDoc.Find(t).Each(tag)
 			}
 		},
 	})
+}
+
+// TODO: add the 'srcset' attr
+func crawlAttrs() []string {
+	return []string{"action", "cite", "data", "formaction",
+		"href", "longdesc", "poster", "src", "srcset", "xmlns"}
+}
+
+func crawlTagNames() []string {
+	return []string{"a", "area", "audio", "base", "blockquote", "button",
+		"embed", "form", "frame", "frameset", "html", "iframe", "img", "input",
+		"ins", "link", "noframes", "object", "q", "script", "source", "track", "video"}
 }
 
 func whichDomain(name string, scope []string) string {

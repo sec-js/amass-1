@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package enum
 
@@ -12,7 +13,15 @@ import (
 	"github.com/caffix/queue"
 	"github.com/caffix/resolve"
 	"github.com/caffix/stringset"
+	"github.com/miekg/dns"
 )
+
+// InitialQueryTypes include the DNS record types that are queried for a discovered name.
+var InitialQueryTypes = []uint16{
+	dns.TypeCNAME,
+	dns.TypeA,
+	dns.TypeAAAA,
+}
 
 // subdomainTask handles newly discovered proper subdomain names in the enumeration.
 type subdomainTask struct {
@@ -104,7 +113,7 @@ func (r *subdomainTask) checkForSubdomains(ctx context.Context, req *requests.DN
 		return false
 	} else if times > 1 && r.withinWildcards.Has(sub) {
 		return false
-	} else if times == 1 && r.enum.Graph.IsCNAMENode(ctx, sub) {
+	} else if times == 1 && r.enum.Sys.GraphDatabases()[0].IsCNAMENode(ctx, sub) {
 		r.cnames.Insert(sub)
 		return false
 	} else if times > 1 && r.cnames.Has(sub) {
@@ -136,10 +145,8 @@ func (r *subdomainTask) subWithinWildcard(ctx context.Context, name, domain stri
 		default:
 		}
 
-		msg := resolve.QueryMsg("a."+name, t)
-		resp, err := r.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.PoolRetryPolicy)
-		if err == nil && resp != nil && len(resp.Answer) > 0 &&
-			r.enum.Sys.Pool().WildcardType(ctx, resp, domain) != resolve.WildcardTypeNone {
+		resp, err := r.enum.Sys.TrustedResolvers().QueryBlocking(ctx, resolve.QueryMsg("a."+name, t))
+		if err == nil && len(resp.Answer) > 0 && r.enum.Sys.TrustedResolvers().WildcardDetected(ctx, resp, domain) {
 			return true
 		}
 	}

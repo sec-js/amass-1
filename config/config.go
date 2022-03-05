@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package config
 
@@ -49,17 +50,11 @@ type Config struct {
 	// Logger for error messages
 	Log *log.Logger
 
-	// Share activates the process that shares findings with providers for service credits
-	Share bool `ini:"share"`
-
 	// The directory that stores the bolt db and other files created
 	Dir string `ini:"output_directory"`
 
 	// Alternative directory for scripts provided by the user
 	ScriptsDirectory string `ini:"scripts_directory"`
-
-	// Use a local graph database
-	LocalDatabase bool
 
 	// The graph databases used by the system / enumerations
 	GraphDBs []*Database
@@ -130,7 +125,10 @@ type Config struct {
 	RecordTypes []string
 
 	// Resolver settings
-	Resolvers []string
+	Resolvers        []string
+	ResolversQPS     int
+	TrustedResolvers []string
+	TrustedQPS       int
 
 	// Option for verbose logging and output
 	Verbose bool
@@ -147,12 +145,11 @@ type Config struct {
 
 // NewConfig returns a default configuration object.
 func NewConfig() *Config {
-	c := &Config{
+	return &Config{
 		UUID:            uuid.New(),
 		Log:             log.New(ioutil.Discard, "", 0),
 		Ports:           []int{80, 443},
 		MinForRecursive: 1,
-		LocalDatabase:   true,
 		// The following is enum-only, but intel will just ignore them anyway
 		Alterations:    true,
 		FlipWords:      true,
@@ -163,10 +160,9 @@ func NewConfig() *Config {
 		EditDistance:   1,
 		Recursive:      true,
 		MinimumTTL:     1440,
+		ResolversQPS:   DefaultQueriesPerPublicResolver,
+		TrustedQPS:     DefaultQueriesPerBaselineResolver,
 	}
-
-	c.calcDNSQueriesMax()
-	return c
 }
 
 // UpdateConfig allows the provided Updater to update the current configuration.

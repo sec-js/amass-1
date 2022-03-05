@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package enum
 
@@ -17,7 +18,7 @@ import (
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/caffix/pipeline"
 	"github.com/caffix/queue"
-	"github.com/caffix/stringset"
+	bf "github.com/tylertreat/BoomFilters"
 )
 
 const (
@@ -33,13 +34,12 @@ type enumSource struct {
 	queue       queue.Queue
 	dups        queue.Queue
 	sweeps      queue.Queue
-	filter      *stringset.Set
-	sweepFilter *stringset.Set
+	filter      *bf.StableBloomFilter
+	sweepFilter *bf.StableBloomFilter
 	subre       *regexp.Regexp
 	done        chan struct{}
 	tokens      chan struct{}
 	doneOnce    sync.Once
-	maxSlots    int
 }
 
 // newEnumSource returns an initialized input source for the enumeration pipeline.
@@ -49,12 +49,11 @@ func newEnumSource(e *Enumeration) *enumSource {
 		queue:       queue.NewQueue(),
 		dups:        queue.NewQueue(),
 		sweeps:      queue.NewQueue(),
-		filter:      stringset.New(),
-		sweepFilter: stringset.New(),
+		filter:      bf.NewDefaultStableBloomFilter(1000000, 0.01),
+		sweepFilter: bf.NewDefaultStableBloomFilter(1000000, 0.01),
 		subre:       dns.AnySubdomainRegex(),
 		done:        make(chan struct{}),
 		tokens:      make(chan struct{}, numDataItemsInput),
-		maxSlots:    e.Config.MaxDNSQueries,
 	}
 
 	for i := 0; i < numDataItemsInput; i++ {
@@ -83,8 +82,8 @@ func (r *enumSource) Stop() {
 	r.queue.Process(func(e interface{}) {})
 	r.dups.Process(func(e interface{}) {})
 	r.sweeps.Process(func(e interface{}) {})
-	r.filter.Close()
-	r.sweepFilter.Close()
+	r.filter.Reset()
+	r.sweepFilter.Reset()
 }
 
 func (r *enumSource) markDone() {
@@ -182,7 +181,7 @@ func (r *enumSource) accept(s, tag, source string, name bool) bool {
 	trusted := requests.TrustedTag(tag)
 	// Do not submit names from untrusted sources, after already receiving the name
 	// from a trusted source
-	if !trusted && r.filter.Has(s+strconv.FormatBool(true)) {
+	if !trusted && r.filter.Test([]byte(s+strconv.FormatBool(true))) {
 		if name {
 			r.dups.Append(&requests.DNSRequest{
 				Name:   s,
@@ -194,7 +193,7 @@ func (r *enumSource) accept(s, tag, source string, name bool) bool {
 	}
 	// At most, a FQDN will be accepted from an untrusted source first, and then
 	// reconsidered from a trusted data source
-	if r.filter.Has(s + strconv.FormatBool(trusted)) {
+	if r.filter.Test([]byte(s + strconv.FormatBool(trusted))) {
 		if name {
 			r.dups.Append(&requests.DNSRequest{
 				Name:   s,
@@ -205,7 +204,7 @@ func (r *enumSource) accept(s, tag, source string, name bool) bool {
 		return false
 	}
 
-	r.filter.Insert(s + strconv.FormatBool(trusted))
+	r.filter.Add([]byte(s + strconv.FormatBool(trusted)))
 	return true
 }
 
@@ -265,7 +264,7 @@ func (r *enumSource) checkForData() {
 		default:
 		}
 
-		needed := r.maxSlots - r.queue.Len()
+		needed := r.enum.Config.MaxDNSQueries - r.queue.Len()
 		if needed <= 0 {
 			time.Sleep(250 * time.Millisecond)
 			continue
@@ -319,8 +318,10 @@ loop:
 				if now.Before(a.Timestamp.Add(time.Minute)) {
 					break
 				}
-				if _, err := r.enum.Graph.ReadNode(r.enum.ctx, a.Name, "fqdn"); err == nil {
-					_, _ = r.enum.Graph.UpsertFQDN(r.enum.ctx, a.Name, a.Source, uuid)
+				for _, g := range r.enum.Sys.GraphDatabases() {
+					if _, err := g.ReadNode(r.enum.ctx, a.Name, "fqdn"); err == nil {
+						_, _ = g.UpsertFQDN(r.enum.ctx, a.Name, a.Source, uuid)
+					}
 				}
 				count++
 			}
@@ -330,8 +331,10 @@ loop:
 
 	r.dups.Process(each)
 	for _, a := range pending {
-		if _, err := r.enum.Graph.ReadNode(r.enum.ctx, a.Name, "fqdn"); err == nil {
-			_, _ = r.enum.Graph.UpsertFQDN(r.enum.ctx, a.Name, a.Source, uuid)
+		for _, g := range r.enum.Sys.GraphDatabases() {
+			if _, err := g.ReadNode(r.enum.ctx, a.Name, "fqdn"); err == nil {
+				_, _ = g.UpsertFQDN(r.enum.ctx, a.Name, a.Source, uuid)
+			}
 		}
 	}
 }
@@ -371,9 +374,8 @@ func (r *enumSource) sweepAddrs(ctx context.Context, req *requests.AddrRequest) 
 		default:
 		}
 
-		if a := ip.String(); !r.sweepFilter.Has(a) {
+		if a := ip.String(); !r.sweepFilter.TestAndAdd([]byte(a)) {
 			count++
-			r.sweepFilter.Insert(a)
 			r.queue.Append(&requests.AddrRequest{
 				Address: a,
 				Domain:  req.Domain,

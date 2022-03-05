@@ -1,5 +1,6 @@
-// Copyright 2017-2021 Jeff Foley. All rights reserved.
+// Copyright © by Jeff Foley 2017-2022. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+// SPDX-License-Identifier: Apache-2.0
 
 package enum
 
@@ -20,6 +21,7 @@ import (
 	"github.com/caffix/queue"
 	"github.com/caffix/resolve"
 	"github.com/miekg/dns"
+	bf "github.com/tylertreat/BoomFilters"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -29,6 +31,7 @@ type dataManager struct {
 	queue       queue.Queue
 	signalDone  chan struct{}
 	confirmDone chan struct{}
+	filter      *bf.StableBloomFilter
 }
 
 // newDataManager returns a dataManager specific to the provided Enumeration.
@@ -38,10 +41,17 @@ func newDataManager(e *Enumeration) *dataManager {
 		queue:       queue.NewQueue(),
 		signalDone:  make(chan struct{}, 2),
 		confirmDone: make(chan struct{}, 2),
+		filter:      bf.NewDefaultStableBloomFilter(1000000, 0.01),
 	}
 
 	go dm.processASNRequests()
 	return dm
+}
+
+func (dm *dataManager) Stop() chan struct{} {
+	dm.filter.Reset()
+	dm.signalDone <- struct{}{}
+	return dm.confirmDone
 }
 
 // Process implements the pipeline Task interface.
@@ -57,11 +67,14 @@ func (dm *dataManager) Process(ctx context.Context, data pipeline.Data, tp pipel
 		return data, nil
 	}
 
+	var id string
 	switch v := data.(type) {
 	case *requests.DNSRequest:
 		if v == nil {
 			return nil, nil
 		}
+
+		id = v.Name
 		if err := dm.dnsRequest(ctx, v, tp); err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, err.Error())
 		}
@@ -69,9 +82,15 @@ func (dm *dataManager) Process(ctx context.Context, data pipeline.Data, tp pipel
 		if v == nil {
 			return nil, nil
 		}
+
+		id = v.Address
 		if err := dm.addrRequest(ctx, v, tp); err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, err.Error())
 		}
+	}
+
+	if id != "" && dm.filter.TestAndAdd([]byte(id)) {
+		return nil, nil
 	}
 	return data, nil
 }
@@ -141,8 +160,10 @@ func (dm *dataManager) insertCNAME(ctx context.Context, req *requests.DNSRequest
 	if err != nil || domain == "" {
 		return errors.New("failed to extract a domain name from the FQDN")
 	}
-	if err := dm.enum.Graph.UpsertCNAME(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert CNAME: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertCNAME(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert CNAME: %v", g, err)
+		}
 	}
 	// Important - Allows chained CNAME records to be resolved until an A/AAAA record
 	dm.enum.nameSrc.pipelineData(ctx, &requests.DNSRequest{
@@ -164,10 +185,11 @@ func (dm *dataManager) insertA(ctx context.Context, req *requests.DNSRequest, re
 	if addr == "" {
 		return errors.New("failed to extract an IP address from the DNS answer data")
 	}
-	if err := dm.enum.Graph.UpsertA(ctx, req.Name, addr, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert A record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertA(ctx, req.Name, addr, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert A record: %v", g, err)
+		}
 	}
-
 	dm.enum.checkForMissedWildcards(addr)
 	dm.enum.nameSrc.pipelineData(ctx, &requests.AddrRequest{
 		Address: addr,
@@ -189,10 +211,11 @@ func (dm *dataManager) insertAAAA(ctx context.Context, req *requests.DNSRequest,
 	if addr == "" {
 		return errors.New("failed to extract an IP address from the DNS answer data")
 	}
-	if err := dm.enum.Graph.UpsertAAAA(ctx, req.Name, addr, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert AAAA record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertAAAA(ctx, req.Name, addr, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert AAAA record: %v", g, err)
+		}
 	}
-
 	dm.enum.checkForMissedWildcards(addr)
 	dm.enum.nameSrc.pipelineData(ctx, &requests.AddrRequest{
 		Address: addr,
@@ -219,8 +242,10 @@ func (dm *dataManager) insertPTR(ctx context.Context, req *requests.DNSRequest, 
 	if domain == "" {
 		return nil
 	}
-	if err := dm.enum.Graph.UpsertPTR(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert PTR record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertPTR(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert PTR record: %v", g, err)
+		}
 	}
 	// Important - Allows the target DNS name to be resolved in the forward direction
 	dm.enum.nameSrc.pipelineData(ctx, &requests.DNSRequest{
@@ -243,8 +268,10 @@ func (dm *dataManager) insertSRV(ctx context.Context, req *requests.DNSRequest, 
 	if target == "" || service == "" {
 		return errors.New("failed to extract service info from the DNS answer data")
 	}
-	if err := dm.enum.Graph.UpsertSRV(ctx, req.Name, service, target, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert SRV record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertSRV(ctx, req.Name, service, target, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert SRV record: %v", g, err)
+		}
 	}
 	if domain := cfg.WhichDomain(target); domain != "" {
 		dm.enum.nameSrc.pipelineData(ctx, &requests.DNSRequest{
@@ -272,8 +299,10 @@ func (dm *dataManager) insertNS(ctx context.Context, req *requests.DNSRequest, r
 	if err != nil || domain == "" {
 		return errors.New("failed to extract a domain name from the FQDN")
 	}
-	if err := dm.enum.Graph.UpsertNS(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert NS record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertNS(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert NS record: %v", g, err)
+		}
 	}
 	if d := strings.ToLower(domain); target != d {
 		dm.enum.nameSrc.pipelineData(ctx, &requests.DNSRequest{
@@ -301,8 +330,10 @@ func (dm *dataManager) insertMX(ctx context.Context, req *requests.DNSRequest, r
 	if err != nil || domain == "" {
 		return errors.New("failed to extract a domain name from the FQDN")
 	}
-	if err := dm.enum.Graph.UpsertMX(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
-		return fmt.Errorf("%s failed to insert MX record: %v", dm.enum.Graph, err)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		if err := g.UpsertMX(ctx, req.Name, target, req.Source, cfg.UUID.String()); err != nil {
+			return fmt.Errorf("%s failed to insert MX record: %v", g, err)
+		}
 	}
 	if d := strings.ToLower(domain); target != d {
 		dm.enum.nameSrc.pipelineData(ctx, &requests.DNSRequest{
@@ -385,16 +416,27 @@ func (dm *dataManager) addrRequest(ctx context.Context, req *requests.AddrReques
 	default:
 	}
 
-	graph := dm.enum.Graph
 	uuid := dm.enum.Config.UUID.String()
-	if req == nil || !req.InScope || graph == nil || uuid == "" {
+	if req == nil || !req.InScope || uuid == "" {
 		return nil
 	}
 	if yes, prefix := amassnet.IsReservedAddress(req.Address); yes {
-		return graph.UpsertInfrastructure(ctx, 0, amassnet.ReservedCIDRDescription, req.Address, prefix, "RIR", uuid)
+		var err error
+		for _, g := range dm.enum.Sys.GraphDatabases() {
+			if e := g.UpsertInfrastructure(ctx, 0, amassnet.ReservedCIDRDescription, req.Address, prefix, "RIR", uuid); e != nil {
+				err = e
+			}
+		}
+		return err
 	}
 	if r := dm.enum.Sys.Cache().AddrSearch(req.Address); r != nil {
-		return graph.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid)
+		var err error
+		for _, g := range dm.enum.Sys.GraphDatabases() {
+			if e := g.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid); e != nil {
+				err = e
+			}
+		}
+		return err
 	}
 
 	dm.queue.Append(&queuedAddrRequest{
@@ -408,7 +450,6 @@ func (dm *dataManager) addrRequest(ctx context.Context, req *requests.AddrReques
 func (dm *dataManager) processASNRequests() {
 	var pending int
 	var finish bool
-	graph := dm.enum.Graph
 	ch := make(chan string, 2)
 	uuid := dm.enum.Config.UUID.String()
 	waiting := make(map[string][]*queuedAddrRequest)
@@ -444,8 +485,9 @@ loop:
 			key := waitMapKey(addr)
 			for _, qar := range waiting[key] {
 				if r := dm.enum.Sys.Cache().AddrSearch(qar.Req.Address); r != nil {
-					_ = graph.UpsertInfrastructure(qar.Ctx, r.ASN,
-						r.Description, qar.Req.Address, r.Prefix, r.Source, uuid)
+					for _, g := range dm.enum.Sys.GraphDatabases() {
+						_ = g.UpsertInfrastructure(qar.Ctx, r.ASN, r.Description, qar.Req.Address, r.Prefix, r.Source, uuid)
+					}
 				} else {
 					keep = append(keep, qar)
 				}
@@ -487,10 +529,11 @@ func waitMapKey(addr string) string {
 func (dm *dataManager) findInfraInfo(ctx context.Context, req *requests.AddrRequest, done chan string) {
 	defer func() { done <- req.Address }()
 
-	graph := dm.enum.Graph
 	uuid := dm.enum.Config.UUID.String()
 	if r := dm.enum.Sys.Cache().AddrSearch(req.Address); r != nil {
-		_ = graph.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid)
+		for _, g := range dm.enum.Sys.GraphDatabases() {
+			_ = g.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid)
+		}
 		return
 	}
 	for _, src := range dm.enum.srcs {
@@ -498,7 +541,9 @@ func (dm *dataManager) findInfraInfo(ctx context.Context, req *requests.AddrRequ
 	}
 	for i := 0; i < 120; i++ {
 		if r := dm.enum.Sys.Cache().AddrSearch(req.Address); r != nil {
-			_ = graph.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid)
+			for _, g := range dm.enum.Sys.GraphDatabases() {
+				_ = g.UpsertInfrastructure(ctx, r.ASN, r.Description, req.Address, r.Prefix, r.Source, uuid)
+			}
 			return
 		}
 		time.Sleep(time.Second)
@@ -507,7 +552,9 @@ func (dm *dataManager) findInfraInfo(ctx context.Context, req *requests.AddrRequ
 	asn := 0
 	desc := "Unknown"
 	prefix := fakePrefix(req.Address)
-	_ = graph.UpsertInfrastructure(ctx, asn, desc, req.Address, prefix, "RIR", uuid)
+	for _, g := range dm.enum.Sys.GraphDatabases() {
+		_ = g.UpsertInfrastructure(ctx, asn, desc, req.Address, prefix, "RIR", uuid)
+	}
 
 	first, cidr, _ := net.ParseCIDR(prefix)
 	dm.enum.Sys.Cache().Update(&requests.ASNRequest{
